@@ -1,4 +1,7 @@
+import base64
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -40,6 +43,23 @@ class Config:
     COOKIES_FROM_BROWSER: str = os.getenv("COOKIES_FROM_BROWSER", "")
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
+    # COOKIES_B64 — cookies.txt, закодированный в base64.
+    # Безопасный способ передать cookies на Render через переменную окружения,
+    # не светя их в публичном репозитории.
+    COOKIES_B64: str = os.getenv("COOKIES_B64", "")
+
+    @classmethod
+    def materialize_cookies(cls) -> None:
+        """Декодирует COOKIES_B64 в файл cookies.txt, если COOKIES_FILE не задан."""
+        if not cls.COOKIES_B64 or cls.COOKIES_FILE:
+            return
+        try:
+            path = Path(cls.DOWNLOADS_DIR) / "cookies.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(base64.b64decode(cls.COOKIES_B64))
+            cls.COOKIES_FILE = str(path)
+        except Exception:
+            pass  # если cookies битые — просто не подключаем
 
     @classmethod
     def validate(cls) -> list[str]:
