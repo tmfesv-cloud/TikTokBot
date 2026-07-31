@@ -213,6 +213,11 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
         opts["cookies"] = Config.COOKIES_FILE
+    # User-Agent как у настоящего Chrome — чтобы YouTube не подозревал бота
+    opts["http_headers"] = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     return opts
 
 
@@ -247,9 +252,18 @@ def _classify_error(msg: str) -> TiktokError:
 def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> DownloadResult:
     """Блокирующая загрузка (вызывается в отдельном потоке)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Уникальная папка на каждый запрос — параллельные загрузки не мешают друг другу
     req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
     req_dir.mkdir()
+
+    # Debug: логируем cookies файл если есть
+    cookie_path = Config.COOKIES_FILE
+    if cookie_path:
+        import os
+        if os.path.exists(cookie_path):
+            size = os.path.getsize(cookie_path)
+            logger.info(f"🍪 Cookies file: {cookie_path} ({size} bytes)")
+        else:
+            logger.warning(f"🍪 Cookies file NOT FOUND: {cookie_path}")
 
     try:
         with yt_dlp.YoutubeDL(_build_opts(req_dir, max_bytes, hd)) as ydl:
