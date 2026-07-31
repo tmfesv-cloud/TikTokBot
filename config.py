@@ -10,6 +10,9 @@ class Config:
     # Telegram
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 
+    # ID владельца бота (для доступа к /stats). Узнай свой ID у @userinfobot
+    OWNER_ID: int = int(os.getenv("OWNER_ID") or "0")
+
     # Webhook / Polling
     USE_WEBHOOK: bool = os.getenv("USE_WEBHOOK", "False").lower() == "true"
     WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
