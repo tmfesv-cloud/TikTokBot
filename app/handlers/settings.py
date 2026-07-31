@@ -46,17 +46,28 @@ def build_kb(s: user_settings.UserSettings) -> InlineKeyboardMarkup:
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
-    """Показывает панель настроек (удаляя сообщение пользователя)."""
+    """Показывает панель настроек.
+
+    В группе удаляет сообщение и отправляет панель в личку пользователю,
+    чтобы её видел только он.
+    """
     try:
         await message.delete()
     except Exception:
         pass  # если нет прав на удаление (группа) — просто игнорируем
     s = user_settings.get(message.from_user.id)
-    await message.answer(
-        format_settings(s),
-        reply_markup=build_kb(s),
-        parse_mode="HTML",
-    )
+    text = format_settings(s)
+    kb = build_kb(s)
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.bot.send_message(
+                message.from_user.id, text, reply_markup=kb, parse_mode="HTML"
+            )
+        except Exception:
+            # Пользователь не начал чат с ботом — отвечаем в группе
+            await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("set:"))
