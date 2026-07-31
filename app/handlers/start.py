@@ -76,6 +76,15 @@ async def on_my_chat_member(update: ChatMemberUpdated) -> None:
             "/settings — настройки скачивания",
             parse_mode="HTML",
         )
+        # Второе сообщение: напоминание о правах администратора
+        await update.bot.send_message(
+            update.chat.id,
+            "🛡 <b>Важно:</b> для полноценной работы бота требуются права "
+            "администратора (для удаления команд).\n\n"
+            "Добавь меня в админы: Управление группой → Участники → "
+            "@PufikSaverBot → Назначить администратором",
+            parse_mode="HTML",
+        )
 
 
 @router.message(Command("help"))
