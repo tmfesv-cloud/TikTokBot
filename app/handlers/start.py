@@ -3,8 +3,9 @@
 import logging
 
 from aiogram import F, Router
+from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.services import user_settings
@@ -41,7 +42,7 @@ def help_text() -> str:
 async def cmd_start(message: Message) -> None:
     """Приветствие."""
     await message.answer(
-        "👋 Привет! Я - пуфик, скачиваю видео из TikTok.\n\n"
+        "👋 Привет! Я - пуфик, скачиваю видео и фото c TikTok, Instagram, Pinterest и YouTube.\n\n"
         "Просто пришли мне ссылку на видео — и я скачаю его без водяного знака 🎬\n\n"
         "Команды:\n"
         "/help — справка\n"
@@ -54,6 +55,24 @@ async def cmd_start(message: Message) -> None:
             await message.answer_sticker(Config.STICKER_FILE_ID)
         except Exception as e:
             logger.warning(f"Не удалось отправить стикер: {e}")
+
+
+@router.my_chat_member()
+async def on_my_chat_member(update: ChatMemberUpdated) -> None:
+    """Приветствие при добавлении бота в группу."""
+    if update.chat.type not in ("group", "supergroup"):
+        return
+    if update.new_chat_member.status in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+    ):
+        await update.bot.send_message(
+            update.chat.id,
+            "👋 Всем привет! Я пуфик — скачиваю видео и фото с TikTok, "
+            "Instagram, Pinterest и YouTube!\n\n"
+            "Просто пришли мне ссылку в чат — и я пришлю готовый результат 🎬",
+            parse_mode="HTML",
+        )
 
 
 @router.message(Command("help"))
