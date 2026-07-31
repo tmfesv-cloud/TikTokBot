@@ -41,7 +41,10 @@ def help_text() -> str:
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     """Приветствие."""
-    stats.register_start(message.from_user.id)
+    u = message.from_user
+    stats.register_start(
+        u.id, stats.make_name(u.username, u.first_name)
+    )
     await message.answer(
         "👋 Привет! Я - пуфик, скачиваю видео и фото c TikTok, Instagram, Pinterest и YouTube.\n\n"
         "Просто пришли мне ссылку на видео — и я скачаю его без водяного знака 🎬\n\n"

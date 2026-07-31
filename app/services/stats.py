@@ -8,6 +8,7 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from html import escape
 
 from config import Config
 
@@ -45,10 +46,20 @@ class _MemoryStats:
     downloads: int = 0
     by_platform: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     by_user: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    names: dict[int, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
 
 
 _mem = _MemoryStats()
+
+
+def make_name(username: str | None, first_name: str | None) -> str:
+    """Человекочитаемое имя пользователя: @юзернейм или имя."""
+    if username:
+        return f"@{username}"
+    if first_name:
+        return first_name
+    return "?"
 
 
 def _ensure_started() -> None:
@@ -60,21 +71,25 @@ def _ensure_started() -> None:
             pass
 
 
-def register_start(user_id: int) -> None:
+def register_start(user_id: int, name: str = "") -> None:
     """Отметить, что пользователь запустил бота."""
     if _redis:
         try:
             _redis.sadd("stats:users", str(user_id))
             _redis.incr("stats:starts")
+            if name:
+                _redis.hset("stats:names", str(user_id), name)
             _ensure_started()
             return
         except Exception:
             pass  # Redis упал — fallback в память
     _mem.users.add(user_id)
     _mem.starts += 1
+    if name:
+        _mem.names[user_id] = name
 
 
-def register_download(user_id: int, platform: str) -> None:
+def register_download(user_id: int, platform: str, name: str = "") -> None:
     """Отметить успешное скачивание."""
     if _redis:
         try:
@@ -82,6 +97,8 @@ def register_download(user_id: int, platform: str) -> None:
             _redis.incr("stats:downloads")
             _redis.incr(f"stats:platform:{platform}")
             _redis.zincrby("stats:by_user", 1, str(user_id))
+            if name:
+                _redis.hset("stats:names", str(user_id), name)
             _ensure_started()
             return
         except Exception:
@@ -90,6 +107,8 @@ def register_download(user_id: int, platform: str) -> None:
     _mem.downloads += 1
     _mem.by_platform[platform] += 1
     _mem.by_user[user_id] += 1
+    if name:
+        _mem.names[user_id] = name
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -141,9 +160,12 @@ def _summary_from_redis() -> str:
 
     top = _redis.zrevrange("stats:by_user", 0, 4, withscores=True)
     if top:
+        uids = [str(uid) for uid, _ in top]
+        names = _redis.hmget("stats:names", *uids) if uids else []
         lines.append("\nТоп пользователей:")
         for i, (uid, n) in enumerate(top, 1):
-            lines.append(f"  {i}. <code>{uid}</code> — {int(n)} скач.")
+            name = names[i - 1] if names and names[i - 1] else str(uid)
+            lines.append(f"  {i}. <b>{escape(str(name))}</b> — {int(n)} скач.")
     else:
         lines.append("\nТоп пользователей:\n  Пока нет данных")
 
@@ -175,7 +197,8 @@ def _summary_from_memory() -> str:
         )[:5]
         lines.append("\nТоп пользователей:")
         for i, (uid, n) in enumerate(top, 1):
-            lines.append(f"  {i}. <code>{uid}</code> — {n} скач.")
+            name = _mem.names.get(uid) or str(uid)
+            lines.append(f"  {i}. <b>{escape(name)}</b> — {n} скач.")
     else:
         lines.append("\nТоп пользователей:\n  Пока нет данных")
 

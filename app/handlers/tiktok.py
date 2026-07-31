@@ -162,7 +162,9 @@ async def _handle_download_inner(message: Message, url: str) -> None:
         return
 
     stats.register_download(
-        user_id, tiktok_service.detect_platform(url)
+        user_id,
+        tiktok_service.detect_platform(url),
+        stats.make_name(message.from_user.username, message.from_user.first_name),
     )
 
     try:
