@@ -21,6 +21,10 @@ router = Router()
 # Команды
 _DOWNLOAD_CMDS = ("/тикток", "/tt", "/скачать", "/скачай", "/download")
 
+# Очереди скачиваний по пользователям
+_queues: dict[int, asyncio.Queue] = {}
+_workers: dict[int, asyncio.Task] = {}
+
 
 def _extract_audio_sync(video_path: Path, out_dir: Path) -> Path | None:
     """Извлекает аудио-дорожку из видео через ffmpeg.
@@ -83,18 +87,63 @@ def _extract_from_command(message: Message) -> str | None:
     return tiktok_service.extract_media_url(parts[1])
 
 
+async def _enqueue(message: Message, url: str) -> None:
+    """Добавить скачивание в очередь пользователя."""
+    user_id = message.from_user.id
+    if user_id not in _queues:
+        _queues[user_id] = asyncio.Queue()
+    await _queues[user_id].put((message, url))
+
+    # Запустить воркер, если не запущен
+    if user_id not in _workers or _workers[user_id].done():
+        _workers[user_id] = asyncio.create_task(_process_queue(user_id))
+
+    left = tiktok_service.cooldown_left(user_id)
+    qsize = _queues[user_id].qsize()
+    if qsize > 1:
+        await message.answer(
+            f"⏳ В очереди: {qsize} видео. Подожди ~{left * qsize} сек.",
+            parse_mode=None,
+        )
+    else:
+        await message.answer(
+            f"⏳ Подожди {left} сек...", parse_mode=None,
+        )
+
+
+async def _process_queue(user_id: int) -> None:
+    """Обработать очередь скачиваний пользователя."""
+    queue = _queues.get(user_id)
+    if not queue:
+        return
+    while not queue.empty():
+        message, url = await queue.get()
+        left = tiktok_service.cooldown_left(user_id)
+        if left > 0:
+            await asyncio.sleep(left)
+        try:
+            await _handle_download_inner(message, url)
+        except Exception as e:
+            logger.error(f"Ошибка в очереди для {user_id}: {e}")
+        queue.task_done()
+
+
 async def _handle_download(message: Message, url: str) -> None:
-    """Общий путь: кулдаун → скачивание → отправка → очистка."""
+    """Общий путь: кулдаун → прямое скачивание или очередь."""
     user_id = message.from_user.id
 
-    # Анти-спам
+    # Анти-спам — ставим в очередь вместо игнорирования
     left = tiktok_service.cooldown_left(user_id)
     if left > 0:
-        await message.answer(
-            f"⏳ Не так быстро! Подожди ещё {left} сек.", parse_mode=None
-        )
+        await _enqueue(message, url)
         return
 
+    await _handle_download_inner(message, url)
+
+
+async def _handle_download_inner(message: Message, url: str) -> None:
+    """Скачивание и отправка (без проверки кулдауна)."""
+    user_id = message.from_user.id
     tiktok_service.mark_used(user_id)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
 
