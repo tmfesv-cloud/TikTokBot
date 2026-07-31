@@ -578,9 +578,9 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
 
 
 async def download(url: str, user_id: int | None = None) -> DownloadResult:
-    """Скачивает видео или фотопост по ссылке TikTok.
+    """Скачивает видео или фотопост по ссылке.
 
-    user_id — для применения личных настроек (качество, лимит размера).
+    user_id — для применения настроек пользователя (качество).
     Бросает TiktokError при любых проблемах.
     """
     # Сразу отсекаем неподдерживаемые ссылки
@@ -591,7 +591,7 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
             "YouTube Shorts, Pinterest."
         )
 
-    # Личные настройки пользователя (качество)
+    # Настройки пользователя (качество)
     s = user_settings.get(user_id) if user_id else None
     hd = s.hd if s else True
 
