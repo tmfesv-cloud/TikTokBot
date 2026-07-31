@@ -13,6 +13,10 @@ class Config:
     # ID владельца бота (для доступа к /stats). Узнай свой ID у @userinfobot
     OWNER_ID: int = int((os.getenv("OWNER_ID") or "0").lstrip("="))
 
+    # Upstash Redis — постоянное хранение статистики (URL + токен из дашборда)
+    REDIS_URL: str = os.getenv("REDIS_URL", "")
+    REDIS_TOKEN: str = os.getenv("REDIS_TOKEN", "")
+
     # Webhook / Polling
     USE_WEBHOOK: bool = os.getenv("USE_WEBHOOK", "False").lower() == "true"
     WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
