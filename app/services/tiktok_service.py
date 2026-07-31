@@ -175,12 +175,12 @@ def detect_platform(url: str) -> str:
 # --- Скачивание --------------------------------------------------------
 
 def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
-    """Опции yt-dlp для TikTok."""
+    """Опции yt-dlp для скачивания.
+
+    HD — лучшее качество; SD — не выше 720p.
+    Для YouTube Shorts и других сложных случаев — гибкий fallback.
+    """
     opts = {
-        # HD — лучшее качество; SD — не выше 720p.
-        # Предпочитаем единый mp4 (видео+аудио) — не требует ffmpeg.
-        # `b` = формат с видео И аудио; если такого нет — берём лучшее.
-        "format": "b[ext=mp4]/b/best" if hd else "b[height<=720]/b/best",
         # Автономер, чтобы фотопосты (несколько картинок) не перезаписывали друг друга
         "outtmpl": str(out_dir / "%(id)s_%(autonumber)03d.%(ext)s"),
         "noplaylist": True,
@@ -191,11 +191,28 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
         "retries": 3,
         "noprogress": True,
     }
-    # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
+    # Формат: HD -> лучший mp4 (video+audio) -> лучший -> любой
+    # SD -> до 720p -> лучший -> любой
+    if hd:
+        opts["format"] = (
+            "b[ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
+            "b[ext=mp4][vcodec^=avc1]/"
+            "b[ext=mp4]/"
+            "b/best"
+        )
+    else:
+        opts["format"] = (
+            "b[height<=720][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
+            "b[height<=720][ext=mp4][vcodec^=avc1]/"
+            "b[height<=720][ext=mp4]/"
+            "b[height<=720]/"
+            "b/best"
+        )
+    # Если TikTok/YouTube блокируют запросы — подставляем cookies
     if Config.COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
-        opts["cookiefile"] = Config.COOKIES_FILE
+        opts["cookies"] = Config.COOKIES_FILE
     return opts
 
 
