@@ -26,7 +26,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 from config import Config
-from app.handlers import start, settings, tiktok
+from app.handlers import admin, start, settings, tiktok
 
 # Настройка логирования
 logging.basicConfig(
@@ -93,6 +93,7 @@ def create_dispatcher() -> Dispatcher:
     """Создаёт и настраивает диспетчер."""
     dp = Dispatcher(storage=MemoryStorage())
 
+    dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(settings.router)
     dp.include_router(tiktok.router)
