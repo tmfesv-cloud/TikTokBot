@@ -159,6 +159,19 @@ def extract_media_url(text: str) -> str | None:
     return url
 
 
+def detect_platform(url: str) -> str:
+    """Определяет платформу по ссылке: tiktok/instagram/youtube/pinterest."""
+    if "tiktok" in url or "tik-tok" in url:
+        return "tiktok"
+    if "instagram" in url:
+        return "instagram"
+    if "youtu.be" in url or "youtube" in url:
+        return "youtube"
+    if "pinterest" in url or "pin.it" in url:
+        return "pinterest"
+    return "other"
+
+
 # --- Скачивание --------------------------------------------------------
 
 def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
