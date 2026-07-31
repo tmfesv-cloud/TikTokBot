@@ -178,155 +178,49 @@ def _is_youtube(url: str) -> bool:
 
 
 async def _download_via_invidious(url: str, out_dir: Path, max_bytes: int, hd: bool) -> DownloadResult:
-    """Скачивает YouTube через публичные Invidious/Piped инстансы."""
-    import aiohttp
-    import asyncio
+    """Скачивает YouTube через встроенную поддержку Invidious в yt-dlp.
+
+    yt-dlp умеет сам перебирать публичные инстансы через extractor-args.
+    """
     from yt_dlp import YoutubeDL
 
-    # Публичные инстансы (могут меняться — обновляй при необходимости)
-    INSTANCES = [
-        # Invidious
-        "https://yewtu.be",
-        "https://inv.nadeko.net",
-        "https://invidious.fdn.fr",
-        "https://invidious.nerdvpn.de",
-        "https://y.artemislena.eu",
-        # Piped
-        "https://piped.api.kavin.rocks",
-        "https://piped.mha.fi",
-    ]
+    req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+    req_dir.mkdir()
 
-    # Вытаскиваем video_id из URL
-    import re
-    video_id = None
-    for pattern in [
-        r"(?:v=|/)([a-zA-Z0-9_-]{11})",  # стандартный v= или /ID
-        r"shorts/([a-zA-Z0-9_-]{11})",   # shorts/ID
-        r"youtu\.be/([a-zA-Z0-9_-]{11})", # youtu.be/ID
-    ]:
-        m = re.search(pattern, url)
-        if m:
-            video_id = m.group(1)
-            break
+    opts = _build_opts(req_dir, max_bytes, hd)
+    # Включаем встроенную поддержку Invidious
+    opts["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android", "web"],
+            "invidiouse": ["yewtu.be", "invidious.fdn.fr", "inv.nadeko.net"],
+        }
+    }
 
-    if not video_id:
-        raise UnsupportedUrlError("🤔 Не удалось извлечь ID видео из ссылки YouTube")
+    try:
+        with YoutubeDL(opts) as ydl:
+            ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        raise _classify_error(str(e)) from e
 
-    # Пробуем каждый инстанс по очереди
-    last_error = None
-    for instance in INSTANCES:
-        try:
-            # Формируем URL для Invidious/Piped API
-            if "piped" in instance:
-                api_url = f"{instance}/streams/{video_id}"
-            else:
-                api_url = f"{instance}/api/v1/videos/{video_id}"
+    files = sorted(
+        p for p in req_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
+    )
+    if not files:
+        raise VideoUnavailableError("😔 Не удалось получить видео через Invidious")
 
-            logger.info(f"Пробуем инстанс {instance} для {video_id}")
+    if any(p.stat().st_size > max_bytes for p in files):
+        raise VideoTooLargeError(
+            f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
+            "боту отправлять такие файлы."
+        )
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(api_url, timeout=15) as resp:
-                    if resp.status != 200:
-                        raise TiktokError(f"Инстанс {instance} вернул {resp.status}")
-                    data = await resp.json()
-
-            # Парсим ответ (формат разный у Invidious и Piped)
-            stream_url = _extract_stream_url(data, instance, hd)
-            if not stream_url:
-                raise TiktokError("Не найден подходящий стрим")
-
-            # Скачиваем через yt-dlp с прямым URL стрима
-            req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
-            req_dir.mkdir()
-
-            opts = _build_opts(req_dir, max_bytes, hd)
-            opts["http_headers"]["Referer"] = instance + "/"
-
-            try:
-                with YoutubeDL(opts) as ydl:
-                    ydl.extract_info(stream_url, download=True)
-            except yt_dlp.utils.DownloadError as e:
-                raise _classify_error(str(e)) from e
-
-            # Собираем файлы
-            files = sorted(
-                p for p in req_dir.iterdir()
-                if p.is_file() and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
-            )
-            if not files:
-                raise VideoUnavailableError("😔 Не удалось получить видео через Invidious")
-
-            if any(p.stat().st_size > max_bytes for p in files):
-                raise VideoTooLargeError(
-                    f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
-                    "боту отправлять такие файлы."
-                )
-
-            return DownloadResult(
-                files=files,
-                is_video=True,
-                title=f"YouTube ({video_id})",
-                _dir=req_dir,
-            )
-
-        except (VideoTooLargeError, VideoUnavailableError):
-            raise
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Инстанс {instance} не сработал: {e}")
-            continue
-
-    raise TiktokError(
-        "😔 Все Invidious/Piped инстансы недоступны. Попробуй другую ссылку или позже."
-    ) from last_error
-
-
-def _extract_stream_url(data: dict, instance: str, hd: bool) -> str | None:
-    """Выбирает лучший URL стрима из ответа Invidious/Piped."""
-    # Piped format
-    if "piped" in instance:
-        streams = data.get("streams", [])
-        if not streams:
-            return None
-        # Сортируем по качеству
-        def quality(s):
-            q = s.get("quality", "").lower()
-            if "1080" in q: return 1080
-            if "720" in q: return 720
-            if "480" in q: return 480
-            if "360" in q: return 360
-            return 0
-        streams.sort(key=quality, reverse=not hd)  # HD = лучшие первыми
-        for s in streams:
-            if s.get("url"):
-                return s["url"]
-        return None
-
-    # Invidious format
-    adaptive = data.get("adaptiveFormats", [])
-    if not adaptive:
-        return None
-
-    # Фильтруем: ищем video+audio или video-only с mp4
-    video_streams = [f for f in adaptive if f.get("type", "").startswith("video")]
-    audio_streams = [f for f in adaptive if f.get("type", "").startswith("audio")]
-
-    # Сначала ищем комбинированные (video+audio в одном)
-    combined = [f for f in video_streams if f.get("audioTrack")]
-    if combined:
-        def quality(f):
-            return f.get("height", 0) or f.get("quality", 0)
-        combined.sort(key=quality, reverse=hd)
-        return combined[0].get("url")
-
-    # Иначе — лучшее видео + лучшее аудио (yt-dlp сам соберёт)
-    if video_streams:
-        def quality(f):
-            return f.get("height", 0) or 0
-        video_streams.sort(key=quality, reverse=hd)
-        return video_streams[0].get("url")
-
-    return None
+    return DownloadResult(
+        files=files,
+        is_video=True,
+        title="YouTube (via Invidious)",
+        _dir=req_dir,
+    )
 
 
 # --- Скачивание --------------------------------------------------------
