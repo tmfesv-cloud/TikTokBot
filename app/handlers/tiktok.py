@@ -12,7 +12,7 @@ from pathlib import Path
 from aiogram import Router
 from aiogram.types import FSInputFile, InputMediaPhoto, Message
 
-from app.services import tiktok_service, user_settings
+from app.services import stats, tiktok_service, user_settings
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,10 @@ async def _handle_download_inner(message: Message, url: str) -> None:
             "😔 Что-то пошло не так. Попробуй ещё раз позже.", parse_mode=None
         )
         return
+
+    stats.register_download(
+        user_id, tiktok_service.detect_platform(url)
+    )
 
     try:
         if result.is_video:
