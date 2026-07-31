@@ -70,14 +70,20 @@ async def on_my_chat_member(update: ChatMemberUpdated) -> None:
             update.chat.id,
             "👋 Всем привет! Я пуфик — скачиваю видео и фото с TikTok, "
             "Instagram, Pinterest и YouTube!\n\n"
-            "Просто пришли мне ссылку в чат — и я пришлю готовый результат 🎬",
+            "Просто пришли мне ссылку в чат — и я пришлю готовый результат 🎬\n\n"
+            "Команды:\n"
+            "/help — справка\n"
+            "/settings — настройки скачивания",
             parse_mode="HTML",
         )
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    """Справка (удаляя сообщение пользователя)."""
+    """Справка (удаляя сообщение пользователя).
+
+    В группе отправляет справку в личку, чтобы её видел только запросивший.
+    """
     try:
         await message.delete()
     except Exception:
@@ -85,7 +91,21 @@ async def cmd_help(message: Message) -> None:
     kb = InlineKeyboardBuilder()
     kb.button(text="❌ Закрыть", callback_data="help:close")
     kb.adjust(1)
-    await message.answer(help_text(), reply_markup=kb.as_markup(), parse_mode="HTML")
+    kb_markup = kb.as_markup()
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.bot.send_message(
+                message.from_user.id, help_text(),
+                reply_markup=kb_markup, parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer(
+                help_text(), reply_markup=kb_markup, parse_mode="HTML"
+            )
+    else:
+        await message.answer(
+            help_text(), reply_markup=kb_markup, parse_mode="HTML"
+        )
 
 
 @router.callback_query(F.data == "help:close")
@@ -103,6 +123,18 @@ async def cmd_clear(message: Message) -> None:
     except Exception:
         pass
     user_id = message.from_user.id
-    _store = user_settings._store
-    _store.pop(user_id, None)
-    await message.answer("🧹 Настройки сброшены к дефолту.", parse_mode="HTML")
+    user_settings.reset(user_id)
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.bot.send_message(
+                user_id, "🧹 Настройки сброшены к дефолту.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer(
+                "🧹 Настройки сброшены к дефолту.", parse_mode="HTML"
+            )
+    else:
+        await message.answer(
+            "🧹 Настройки сброшены к дефолту.", parse_mode="HTML"
+        )
