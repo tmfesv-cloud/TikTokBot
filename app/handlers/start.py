@@ -62,7 +62,13 @@ async def on_my_chat_member(update: ChatMemberUpdated) -> None:
     """Приветствие при добавлении бота в группу."""
     if update.chat.type not in ("group", "supergroup"):
         return
-    if update.new_chat_member.status in (
+    # Приветствуем только при реальном добавлении (раньше бота не было),
+    # а не при назначении админом — иначе сообщения будут дублироваться
+    was_absent = update.old_chat_member.status in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    )
+    if was_absent and update.new_chat_member.status in (
         ChatMemberStatus.MEMBER,
         ChatMemberStatus.ADMINISTRATOR,
     ):
