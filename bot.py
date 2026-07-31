@@ -132,11 +132,23 @@ def start_webhook() -> None:
 
     app = web.Application()
 
-    # Health check — чтобы Render не засыпал
+    # Health check — чтобы Render не засыпал на бесплатном тарифе
+    import time as _time
+    _start_time = _time.time()
+
     async def health(request):
         return web.Response(text="TikTokBot is alive!")
 
+    async def ping(request):
+        uptime = int(_time.time() - _start_time)
+        return web.json_response({
+            "status": "ok",
+            "uptime_seconds": uptime,
+            "bot": "Pufik",
+        })
+
     app.router.add_get("/", health)
+    app.router.add_get("/ping", ping)
 
     # Настраиваем вебхук
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
