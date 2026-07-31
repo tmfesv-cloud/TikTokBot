@@ -20,6 +20,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 from aiogram.utils.token import TokenValidationError
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -61,7 +62,14 @@ def _create_bot() -> Bot:
 
 
 async def on_startup(bot: Bot) -> None:
-    """Действия при запуске: установка вебхука."""
+    """Действия при запуске: меню команд + вебхук."""
+    # Синяя кнопка меню с командами
+    await bot.set_my_commands([
+        BotCommand(command="help", description="Справка"),
+        BotCommand(command="settings", description="Настройки скачивания"),
+        BotCommand(command="clear", description="Сбросить настройки"),
+    ])
+
     if Config.USE_WEBHOOK:
         base = Config.WEBHOOK_URL or os.getenv("RENDER_EXTERNAL_URL", "")
         if not base:
