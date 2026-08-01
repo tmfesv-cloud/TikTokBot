@@ -178,9 +178,9 @@ def _is_youtube(url: str) -> bool:
 
 
 async def _download_via_invidious(url: str, out_dir: Path, max_bytes: int, hd: bool) -> DownloadResult:
-    """Скачивает YouTube через встроенную поддержку Invidious в yt-dlp.
+    """Скачивает YouTube через другие клиенты (tv, android_vr, web_safari).
 
-    yt-dlp умеет сам перебирать публичные инстансы через extractor-args.
+    Эти клиенты часто обходят бот-детект YouTube без cookies.
     """
     from yt_dlp import YoutubeDL
 
@@ -188,11 +188,10 @@ async def _download_via_invidious(url: str, out_dir: Path, max_bytes: int, hd: b
     req_dir.mkdir()
 
     opts = _build_opts(req_dir, max_bytes, hd)
-    # Включаем встроенную поддержку Invidious
+    # Пробуем клиенты, которые не требуют cookies (телевизор, Android VR, Safari)
     opts["extractor_args"] = {
         "youtube": {
-            "player_client": ["android", "web"],
-            "invidiouse": ["yewtu.be", "invidious.fdn.fr", "inv.nadeko.net"],
+            "player_client": ["tv_embedded", "tv", "android_vr", "web_safari", "ios"]
         }
     }
 
@@ -207,7 +206,7 @@ async def _download_via_invidious(url: str, out_dir: Path, max_bytes: int, hd: b
         if p.is_file() and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
     )
     if not files:
-        raise VideoUnavailableError("😔 Не удалось получить видео через Invidious")
+        raise VideoUnavailableError("😔 Не удалось получить видео (клиенты YouTube).")
 
     if any(p.stat().st_size > max_bytes for p in files):
         raise VideoTooLargeError(
@@ -218,7 +217,7 @@ async def _download_via_invidious(url: str, out_dir: Path, max_bytes: int, hd: b
     return DownloadResult(
         files=files,
         is_video=True,
-        title="YouTube (via Invidious)",
+        title="YouTube (альт. клиент)",
         _dir=req_dir,
     )
 
