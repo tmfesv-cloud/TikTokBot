@@ -172,65 +172,15 @@ def detect_platform(url: str) -> str:
     return "other"
 
 
-def _is_youtube(url: str) -> bool:
-    """Проверяет, что ссылка — YouTube/Shorts."""
-    return "youtube.com" in url or "youtu.be" in url
-
-
-async def _download_via_invidious(url: str, out_dir: Path, max_bytes: int, hd: bool) -> DownloadResult:
-    """Скачивает YouTube через другие клиенты (tv, android_vr, web_safari).
-
-    Эти клиенты часто обходят бот-детект YouTube без cookies.
-    """
-    from yt_dlp import YoutubeDL
-
-    req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
-    req_dir.mkdir()
-
-    opts = _build_opts(req_dir, max_bytes, hd)
-    # Пробуем клиенты, которые не требуют cookies (телевизор, Android VR, Safari)
-    opts["extractor_args"] = {
-        "youtube": {
-            "player_client": ["tv_embedded", "tv", "android_vr", "web_safari", "ios"]
-        }
-    }
-
-    try:
-        with YoutubeDL(opts) as ydl:
-            ydl.extract_info(url, download=True)
-    except yt_dlp.utils.DownloadError as e:
-        raise _classify_error(str(e)) from e
-
-    files = sorted(
-        p for p in req_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
-    )
-    if not files:
-        raise VideoUnavailableError("😔 Не удалось получить видео (клиенты YouTube).")
-
-    if any(p.stat().st_size > max_bytes for p in files):
-        raise VideoTooLargeError(
-            f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
-            "боту отправлять такие файлы."
-        )
-
-    return DownloadResult(
-        files=files,
-        is_video=True,
-        title="YouTube (альт. клиент)",
-        _dir=req_dir,
-    )
-
-
 # --- Скачивание --------------------------------------------------------
 
 def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
-    """Опции yt-dlp для скачивания.
-
-    HD — лучшее качество; SD — не выше 720p.
-    Для YouTube Shorts и других сложных случаев — гибкий fallback.
-    """
+    """Опции yt-dlp для TikTok."""
     opts = {
+        # HD — лучшее качество; SD — не выше 720p.
+        # Предпочитаем единый mp4 (видео+аудио) — не требует ffmpeg.
+        # `b` = формат с видео И аудио; если такого нет — берём лучшее.
+        "format": "b[ext=mp4]/b/best" if hd else "b[height<=720]/b/best",
         # Автономер, чтобы фотопосты (несколько картинок) не перезаписывали друг друга
         "outtmpl": str(out_dir / "%(id)s_%(autonumber)03d.%(ext)s"),
         "noplaylist": True,
@@ -241,33 +191,11 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
         "retries": 3,
         "noprogress": True,
     }
-    # Формат: HD -> лучший mp4 (video+audio) -> лучший -> любой
-    # SD -> до 720p -> лучший -> любой
-    if hd:
-        opts["format"] = (
-            "b[ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
-            "b[ext=mp4][vcodec^=avc1]/"
-            "b[ext=mp4]/"
-            "b/best"
-        )
-    else:
-        opts["format"] = (
-            "b[height<=720][ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
-            "b[height<=720][ext=mp4][vcodec^=avc1]/"
-            "b[height<=720][ext=mp4]/"
-            "b[height<=720]/"
-            "b/best"
-        )
-    # Если TikTok/YouTube блокируют запросы — подставляем cookies
+    # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
     if Config.COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
-        opts["cookies"] = Config.COOKIES_FILE
-    # User-Agent как у настоящего Chrome — чтобы YouTube не подозревал бота
-    opts["http_headers"] = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+        opts["cookiefile"] = Config.COOKIES_FILE
     return opts
 
 
@@ -302,18 +230,9 @@ def _classify_error(msg: str) -> TiktokError:
 def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> DownloadResult:
     """Блокирующая загрузка (вызывается в отдельном потоке)."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Уникальная папка на каждый запрос — параллельные загрузки не мешают друг другу
     req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
     req_dir.mkdir()
-
-    # Debug: логируем cookies файл если есть
-    cookie_path = Config.COOKIES_FILE
-    if cookie_path:
-        import os
-        if os.path.exists(cookie_path):
-            size = os.path.getsize(cookie_path)
-            logger.info(f"🍪 Cookies file: {cookie_path} ({size} bytes)")
-        else:
-            logger.warning(f"🍪 Cookies file NOT FOUND: {cookie_path}")
 
     try:
         with yt_dlp.YoutubeDL(_build_opts(req_dir, max_bytes, hd)) as ydl:
@@ -721,15 +640,6 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
                     return await _download_via_tikwm(
                         normalized, out_dir, max_bytes, hd
                     )
-                except (VideoTooLargeError, VideoUnavailableError):
-                    raise
-                except TiktokError:
-                    raise primary from None
-            # YouTube — пробуем альтернативные фронтенды (Invidious/Piped)
-            if _is_youtube(normalized):
-                logger.info(f"yt-dlp не смог, пробуем Invidious/Piped: {normalized}")
-                try:
-                    return await _download_via_invidious(normalized, out_dir, max_bytes, hd)
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
                 except TiktokError:

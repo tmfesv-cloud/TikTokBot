@@ -179,16 +179,6 @@ def main() -> None:
             logger.error(f"  ❌ {err}")
         sys.exit(1)
 
-    # Материализуем cookies из base64 в файл (для YouTube против ботов)
-    Config.materialize_cookies()
-    if Config.COOKIES_FILE:
-        logger.info(f"🍪 Cookies активны: {Config.COOKIES_FILE}")
-    else:
-        logger.warning(
-            "🍪 Cookies не подключены. Если YouTube блокирует — задай "
-            "COOKIES_B64 (base64 от cookies.txt) или COOKIES_FILE."
-        )
-
     # Автоопределение Render: если есть PORT — это Render, включаем webhook
     # даже если USE_WEBHOOK не задан в переменных
     if os.getenv("PORT"):
