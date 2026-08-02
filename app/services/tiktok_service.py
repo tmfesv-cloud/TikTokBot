@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import re
+import subprocess
 import textwrap
 import time
 import uuid
@@ -90,6 +91,10 @@ _MEDIA_URL_RE = re.compile(
 
 # Ограничиваем число одновременных скачиваний
 _SEMAPHORE = asyncio.Semaphore(3)
+
+# Потолок размера исходного видео, которое качаем для последующего сжатия (МБ).
+# Файлы больше этого — сразу ошибка «слишком большой» (гигабайты не качаем).
+_COMPRESS_MAX_MB = 200
 
 # Заголовки для HTTP-запросов к TikTok CDN и tikwm (без UA они отдают 403)
 _HTTP_HEADERS = {
@@ -297,8 +302,8 @@ def _classify_error(msg: str) -> TiktokError:
     lower = msg.lower()
     if "max-filesize" in lower or ("larger than" in lower and "filesize" in lower):
         return VideoTooLargeError(
-            f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт боту "
-            "отправлять такие файлы. Попробуй другое видео."
+            "📦 Видео слишком большое — даже сжатое не поместится в лимит "
+            "Telegram. Попробуй другое видео."
         )
     if any(k in lower for k in ("timed out", "timeout", "timedout")):
         return DownloadTimeoutError(
@@ -395,8 +400,8 @@ async def _download_file(
                 size += len(chunk)
                 if size > max_bytes:
                     raise VideoTooLargeError(
-                        f"📦 Файл больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
-                        "боту отправлять такие файлы."
+                        "📦 Файл слишком большой — даже сжатое не поместится "
+                        "в лимит Telegram."
                     )
                 f.write(chunk)
         if size == 0:
@@ -460,9 +465,7 @@ async def _improve_tiktok_audio(
             str(improved_path),
         ]
         proc = await asyncio.to_thread(
-            lambda: __import__("subprocess").run(
-                cmd, capture_output=True, timeout=180
-            )
+            lambda: subprocess.run(cmd, capture_output=True, timeout=180)
         )
         if proc.returncode != 0 or not improved_path.exists() or improved_path.stat().st_size == 0:
             logger.warning("TikTok audio: ffmpeg не сработал, оставляем оригинал")
@@ -477,6 +480,70 @@ async def _improve_tiktok_audio(
     finally:
         music_path.unlink(missing_ok=True)
 
+    return result
+
+
+def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | None:
+    """Сжимает видео через ffmpeg до target_bytes.
+
+    Пробует последовательно -crf 28 → 32 → 36, пока размер не влезет
+    в лимит. Возвращает путь к сжатому файлу или None, если ffmpeg
+    не сработал (вызывающий решит, что делать).
+    """
+    out = out_dir / "compressed.mp4"
+    for crf in (28, 32, 36):
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", str(src),
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", str(crf),
+                    "-c:a", "aac",
+                    "-b:a", "96k",
+                    "-movflags", "+faststart",
+                    str(out),
+                ],
+                capture_output=True,
+                timeout=600,
+            )
+        except FileNotFoundError:
+            logger.debug("ffmpeg не найден — сжатие видео невозможно")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg timeout при сжатии видео")
+            return None
+        if proc.returncode != 0:
+            logger.warning(f"ffmpeg не сжал видео (crf={crf}): {proc.stderr[:200]}")
+            continue
+        if out.exists() and out.stat().st_size <= target_bytes:
+            logger.info(f"Видео сжато до {out.stat().st_size // 1024 // 1024} МБ (crf={crf})")
+            return out
+    # Не влезло даже на crf=36 — отдаём самый маленький вариант (или None)
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    return None
+
+
+async def _ensure_size(result: DownloadResult) -> DownloadResult:
+    """Сжимает видео, если оно больше лимита Telegram (45 МБ).
+
+    Скачивание идёт с потолком _COMPRESS_MAX_MB (200 МБ), поэтому сюда
+    попадают файлы 45–200 МБ. Меньше лимита — отдаём как есть, без сжатия.
+    """
+    if not result.is_video or not result.files or not result._dir:
+        return result
+    limit = Config.MAX_VIDEO_MB * 1024 * 1024
+    if result.files[0].stat().st_size <= limit:
+        return result
+
+    compressed = await asyncio.to_thread(
+        _compress_video_sync, result.files[0], result._dir, limit
+    )
+    if compressed:
+        logger.info("Большое видео сжато и будет отправлено")
+        result.files = [compressed]
     return result
 
 
@@ -523,8 +590,8 @@ def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> D
         raise VideoUnavailableError("😔 Не удалось получить видео из пина.")
     if any(p.stat().st_size > max_bytes for p in files):
         raise VideoTooLargeError(
-            f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
-            "боту отправлять такие файлы."
+            "📦 Видео слишком большое — даже сжатое не поместится в лимит "
+            "Telegram."
         )
     return DownloadResult(
         files=files,
@@ -788,14 +855,17 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
     # Pinterest — кастомный парсинг (yt-dlp не умеет картинки)
     is_pinterest = bool(re.search(r"pinterest\.(?:com|co\.\w+)|pin\.it", normalized))
 
-    max_bytes = Config.MAX_VIDEO_MB * 1024 * 1024
+    # Потолок скачивания — 200 МБ (чтобы потом можно было сжать до 45 МБ).
+    # Файлы больше 200 МБ отсекаются ещё на этапе скачивания.
+    max_bytes = _COMPRESS_MAX_MB * 1024 * 1024
     out_dir = Path(Config.DOWNLOADS_DIR)
     logger.info(f"Скачивание (hd={hd}): {normalized}")
     async with _SEMAPHORE:
         # Pinterest — сразу кастомный путь (yt-dlp не извлекает картинки)
         if is_pinterest:
             try:
-                return await _download_pinterest(normalized, out_dir, max_bytes)
+                result = await _download_pinterest(normalized, out_dir, max_bytes)
+                return await _ensure_size(result)
             except TiktokError:
                 raise
 
@@ -806,8 +876,8 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
             )
             # TikTok: улучшаем звук (если включено в настройках)
             if is_tiktok and result.is_video:
-                return await _improve_tiktok_audio(result, normalized, user_id)
-            return result
+                result = await _improve_tiktok_audio(result, normalized, user_id)
+            return await _ensure_size(result)
         except (VideoTooLargeError, UnsupportedUrlError):
             # Эти ошибки уже точные — fallback не нужен
             raise
@@ -820,8 +890,8 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
                         normalized, out_dir, max_bytes, hd
                     )
                     if result.is_video:
-                        return await _improve_tiktok_audio(result, normalized, user_id)
-                    return result
+                        result = await _improve_tiktok_audio(result, normalized, user_id)
+                    return await _ensure_size(result)
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
                 except TiktokError:
