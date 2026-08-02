@@ -41,6 +41,12 @@ class Config:
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
 
+    # Улучшать звук TikTok: подмешивать оригинальный трек (128 kbps) вместо
+    # слабой дорожки (~64 kbps). Требует ffmpeg и лишний запрос к tikwm.
+    IMPROVE_TIKTOK_AUDIO: bool = (
+        os.getenv("IMPROVE_TIKTOK_AUDIO", "").lower() in ("1", "true", "yes", "on")
+    )
+
     @classmethod
     def validate(cls) -> list[str]:
         """Проверяет, что все необходимые переменные заданы."""

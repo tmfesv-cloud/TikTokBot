@@ -361,6 +361,75 @@ def _tikwm_author(data: dict) -> str:
     return a.get("nickname") or a.get("unique_id") or ""
 
 
+async def _improve_tiktok_audio(
+    result: DownloadResult, url: str
+) -> DownloadResult:
+    """Подмешивает оригинальный трек TikTok вместо слабой дорожки (~64 kbps).
+
+    Улучшение только если включено Config.IMPROVE_TIKTOK_AUDIO (выкл по умолчанию).
+    Берёт music URL из tikwm, качает mp3 и через ffmpeg заменяет аудио-дорожку
+    видео на него. При любой ошибке возвращает исходный result — без падений.
+    """
+    if not Config.IMPROVE_TIKTOK_AUDIO:
+        return result
+    if not result.is_video or not result.files or not result._dir:
+        return result
+
+    video = result.files[0]
+    req_dir = result._dir
+    music_path = req_dir / "orig_music.mp3"
+    improved_path = req_dir / "improved.mp4"
+
+    try:
+        # 1. Узнаём URL оригинального трека через tikwm и качаем его
+        async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
+            async with session.get(
+                "https://www.tikwm.com/api/",
+                params={"url": url, "hd": 1},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                payload = await resp.json(content_type=None)
+            data = payload.get("data") or {}
+            music_url = data.get("music")
+            if not music_url:
+                logger.info("TikTok audio: нет music URL — оставляем как есть")
+                return result
+
+            # 2. Качаем трек
+            await _download_file(session, music_url, music_path, 50 * 1024 * 1024)
+
+        # 3. Подмешиваем через ffmpeg (видео без перекодирования, звук из трека)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video),
+            "-i", str(music_path),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            str(improved_path),
+        ]
+        proc = await asyncio.to_thread(
+            lambda: __import__("subprocess").run(
+                cmd, capture_output=True, timeout=180
+            )
+        )
+        if proc.returncode != 0 or not improved_path.exists() or improved_path.stat().st_size == 0:
+            logger.warning("TikTok audio: ffmpeg не сработал, оставляем оригинал")
+            return result
+
+        # Заменяем файл видео на улучшенный
+        result.files = [improved_path]
+        video.unlink(missing_ok=True)
+        logger.info("TikTok audio: улучшено до 128 kbps")
+    except Exception as e:
+        logger.warning(f"TikTok audio: улучшение не удалось ({e}), оставляем оригинал")
+    finally:
+        music_path.unlink(missing_ok=True)
+
+    return result
+
+
 def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> DownloadResult:
     """Скачивание HLS-видео из Pinterest через yt-dlp + ffmpeg.
 
@@ -681,9 +750,13 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
 
         # Остальное — через yt-dlp
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 _download_sync, normalized, out_dir, max_bytes, hd
             )
+            # TikTok: улучшаем звук (если включено в настройках)
+            if is_tiktok and result.is_video:
+                return await _improve_tiktok_audio(result, normalized)
+            return result
         except (VideoTooLargeError, UnsupportedUrlError):
             # Эти ошибки уже точные — fallback не нужен
             raise
@@ -692,9 +765,12 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
             if is_tiktok:
                 logger.info(f"yt-dlp не смог, пробуем tikwm: {normalized}")
                 try:
-                    return await _download_via_tikwm(
+                    result = await _download_via_tikwm(
                         normalized, out_dir, max_bytes, hd
                     )
+                    if result.is_video:
+                        return await _improve_tiktok_audio(result, normalized)
+                    return result
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
                 except TiktokError:
