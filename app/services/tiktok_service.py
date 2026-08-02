@@ -486,28 +486,50 @@ async def _improve_tiktok_audio(
 def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | None:
     """Сжимает видео через ffmpeg до target_bytes.
 
-    Пробует последовательно -crf 28 → 32 → 36, пока размер не влезет
-    в лимит. Возвращает путь к сжатому файлу или None, если ffmpeg
-    не сработал (вызывающий решит, что делать).
+    Понижает разрешение до 720p (если выше), затем пробует -crf 28 → 32 → 36,
+    пока размер не влезет в лимит. Возвращает путь к сжатому файлу или None,
+    если не влезло даже на crf=36 (вызывающий покажет ошибку).
     """
     out = out_dir / "compressed.mp4"
+
+    # Определяем разрешение: если выше 720p — масштабируем, это резко
+    # сокращает работу и размер (обычно достаточно одного прохода).
+    vf = []
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=height",
+                "-of", "csv=p=0",
+                str(src),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        height = int(probe.stdout.strip().splitlines()[0])
+        if height > 720:
+            vf = ["-vf", "scale=-2:720"]
+    except Exception:
+        pass  # не смогли узнать высоту — сжимаем как есть
+
     for crf in (28, 32, 36):
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(src),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", str(crf),
+        ]
+        if vf:
+            cmd += vf
+        cmd += [
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-movflags", "+faststart",
+            str(out),
+        ]
         try:
-            proc = subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-i", str(src),
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", str(crf),
-                    "-c:a", "aac",
-                    "-b:a", "96k",
-                    "-movflags", "+faststart",
-                    str(out),
-                ],
-                capture_output=True,
-                timeout=600,
-            )
+            proc = subprocess.run(cmd, capture_output=True, timeout=600)
         except FileNotFoundError:
             logger.debug("ffmpeg не найден — сжатие видео невозможно")
             return None
@@ -520,9 +542,7 @@ def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | 
         if out.exists() and out.stat().st_size <= target_bytes:
             logger.info(f"Видео сжато до {out.stat().st_size // 1024 // 1024} МБ (crf={crf})")
             return out
-    # Не влезло даже на crf=36 — отдаём самый маленький вариант (или None)
-    if out.exists() and out.stat().st_size > 0:
-        return out
+    # Не влезло даже на crf=36 — не отдаём файл больше лимита
     return None
 
 
@@ -544,7 +564,14 @@ async def _ensure_size(result: DownloadResult) -> DownloadResult:
     if compressed:
         logger.info("Большое видео сжато и будет отправлено")
         result.files = [compressed]
-    return result
+        return result
+
+    # Не влезло в лимит даже после сжатия — отдаём понятную ошибку,
+    # а не пытаемся отправить файл, который Telegram всё равно отклонит.
+    raise VideoTooLargeError(
+        "📦 Видео слишком большое — не удалось сжать до лимита Telegram. "
+        "Попробуй другое видео."
+    )
 
 
 def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> DownloadResult:
