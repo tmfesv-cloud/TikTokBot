@@ -263,10 +263,11 @@ def detect_platform(url: str) -> str:
 def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
                 platform: str | None = None) -> dict:
     """Опции yt-dlp для TikTok."""
-    # VK отдаёт видео/аудио раздельными DASH-потоками и счётчик размера
-    # не заполняет — поэтому ограничиваем качество и склеиваем через ffmpeg,
-    # иначе yt-dlp хватает 4K (гигабайты) и упирается в max_filesize.
-    if platform == "vk":
+    # VK и Rutube отдают через HLS/DASH, где размер неизвестен заранее —
+    # max_filesize не может остановить скачивание. Поэтому сразу ограничиваем
+    # качество до 720p, иначе yt-dlp хватает гигабайты (а на Render не хватит
+    # памяти/диска). VK ещё и склеивает видео+аудио через ffmpeg.
+    if platform in ("vk", "rutube"):
         fmt = "bv[height<=720]+ba/b[height<=720]/b"
     else:
         # HD — лучшее качество; SD — не выше 720p.
@@ -286,8 +287,8 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
         "retries": 3,
         "noprogress": True,
     }
-    # VK: склейка видео+аудио через ffmpeg (установлен в Dockerfile и на Render)
-    if platform == "vk":
+    # VK и Rutube: склейка видео+аудио через ffmpeg (установлен в Dockerfile и на Render)
+    if platform in ("vk", "rutube"):
         opts["merge_output_format"] = "mp4"
     # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
     if Config.COOKIES_FROM_BROWSER:

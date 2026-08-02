@@ -167,15 +167,28 @@ async def _handle_download_inner(message: Message, url: str) -> None:
     tiktok_service.mark_used(user_id)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
 
+    # Фидбек — чтобы пользователь видел, что бот работает (большие видео качаются долго)
+    status_msg = await message.answer(
+        "⏳ Скачиваю видео...", parse_mode=None
+    )
+
     result = None
     s = user_settings.get(user_id)
     try:
         result = await tiktok_service.download(url, user_id=user_id)
     except tiktok_service.TiktokError as e:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         await message.answer(str(e), parse_mode=None)
         return
     except Exception as e:
         logger.exception(f"Ошибка скачивания для {user_id}")
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         await message.answer(
             "😔 Что-то пошло не так. Попробуй ещё раз позже.", parse_mode=None
         )
@@ -228,10 +241,18 @@ async def _handle_download_inner(message: Message, url: str) -> None:
                     logger.warning(f"Не удалось отправить аудио: {e}")
     except Exception as e:
         logger.exception(f"Ошибка отправки файла для {user_id}")
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         await message.answer(
             "😔 Не удалось отправить файл. Попробуй ещё раз.", parse_mode=None
         )
     finally:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         if result:
             result.cleanup()
 
