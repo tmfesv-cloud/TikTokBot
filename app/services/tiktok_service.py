@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import re
+import textwrap
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -19,12 +20,41 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+
+def _patch_vk_wallpost_audio_bug() -> None:
+    """Обход бага yt-dlp: VKWallPostIE падает, когда в посте data-audio — не объект.
+
+    yt-dlp 2026.07.04: строка `if not audio['url']:` кидает TypeError,
+    если ВК отдаёт аудио списком вместо объекта. Точечно заменяем эту строку
+    на безопасную проверку. Если структура метода изменится — просто не патчим.
+    """
+    try:
+        import inspect
+        import yt_dlp.extractor.vk as vk_mod
+
+        src = inspect.getsource(vk_mod.VKWallPostIE._real_extract)
+        new_src = textwrap.dedent(src).replace(
+            "if not audio['url']:",
+            "if not isinstance(audio, dict) or not audio.get('url'):",
+        )
+        if new_src == src:
+            return  # строка не найдена — версия другая, не трогаем
+
+        exec(compile(new_src, "<vk_patch>", "exec"), vk_mod.__dict__)
+        vk_mod.VKWallPostIE._real_extract = vk_mod.__dict__["_real_extract"]
+        logger.info("VK: применён патч бага с audio в постах со стены")
+    except Exception as e:
+        logger.warning(f"VK: не удалось применить патч audio-бага: {e}")
+
+
+_patch_vk_wallpost_audio_bug()
+
 # Расширения скачанных файлов
 _VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _MEDIA_EXTS = _VIDEO_EXTS | _IMAGE_EXTS
 
-# Поддерживаемые платформы: TikTok, Instagram, YouTube, Pinterest
+# Поддерживаемые платформы: TikTok, Instagram, YouTube, Pinterest, VK
 _MEDIA_URL_RE = re.compile(
     r"(?:https?://)?"
     r"(?:"
@@ -33,6 +63,8 @@ _MEDIA_URL_RE = re.compile(
     r"|(?:www\.|m\.)?youtu(?:\.be|be\.com)"
     r"|(?:www\.|m\.)?pinterest\.(?:com|co\.[a-z]{2})"
     r"|pin\.it"
+    r"|(?:www\.|m\.)?vk\.(?:com|ru)"
+    r"|(?:www\.|m\.)?vkvideo\.ru"
     r")"
     r"/\S+",
     re.IGNORECASE,
@@ -160,7 +192,7 @@ def extract_media_url(text: str) -> str | None:
 
 
 def detect_platform(url: str) -> str:
-    """Определяет платформу по ссылке: tiktok/instagram/youtube/pinterest."""
+    """Определяет платформу по ссылке: tiktok/instagram/youtube/pinterest/vk."""
     if "tiktok" in url or "tik-tok" in url:
         return "tiktok"
     if "instagram" in url:
@@ -169,18 +201,29 @@ def detect_platform(url: str) -> str:
         return "youtube"
     if "pinterest" in url or "pin.it" in url:
         return "pinterest"
+    if "vk.com" in url or "vk.ru" in url or "vkvideo.ru" in url:
+        return "vk"
     return "other"
 
 
 # --- Скачивание --------------------------------------------------------
 
-def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
+def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
+                platform: str | None = None) -> dict:
     """Опции yt-dlp для TikTok."""
-    opts = {
+    # VK отдаёт видео/аудио раздельными DASH-потоками и счётчик размера
+    # не заполняет — поэтому ограничиваем качество и склеиваем через ffmpeg,
+    # иначе yt-dlp хватает 4K (гигабайты) и упирается в max_filesize.
+    if platform == "vk":
+        fmt = "bv[height<=720]+ba/b[height<=720]/b"
+    else:
         # HD — лучшее качество; SD — не выше 720p.
         # Предпочитаем единый mp4 (видео+аудио) — не требует ffmpeg.
         # `b` = формат с видео И аудио; если такого нет — берём лучшее.
-        "format": "b[ext=mp4]/b/best" if hd else "b[height<=720]/b/best",
+        fmt = "b[ext=mp4]/b/best" if hd else "b[height<=720]/b/best"
+
+    opts = {
+        "format": fmt,
         # Автономер, чтобы фотопосты (несколько картинок) не перезаписывали друг друга
         "outtmpl": str(out_dir / "%(id)s_%(autonumber)03d.%(ext)s"),
         "noplaylist": True,
@@ -191,6 +234,9 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
         "retries": 3,
         "noprogress": True,
     }
+    # VK: склейка видео+аудио через ffmpeg (установлен в Dockerfile и на Render)
+    if platform == "vk":
+        opts["merge_output_format"] = "mp4"
     # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
     if Config.COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
@@ -234,15 +280,18 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
     req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
     req_dir.mkdir()
 
+    platform = detect_platform(url)
+    opts = _build_opts(req_dir, max_bytes, hd, platform)
+
     try:
-        with yt_dlp.YoutubeDL(_build_opts(req_dir, max_bytes, hd)) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except yt_dlp.utils.UnsupportedError as e:
         _rmtree(req_dir)
         logger.warning(f"Неподдерживаемый URL {url}: {e}")
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube Shorts, Pinterest."
+            "YouTube, Pinterest, VK."
         ) from e
     except yt_dlp.utils.DownloadError as e:
         _rmtree(req_dir)
@@ -601,8 +650,14 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
     if not normalized:
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube Shorts, Pinterest."
+            "YouTube, Pinterest, VK."
         )
+
+    # vk.ru — тот же сайт, но yt-dlp знает только vk.com
+    # (vkvideo.ru не трогаем — у него свой extractor)
+    if "vk.ru" in normalized:
+        normalized = re.sub(r"vk\.ru", "vk.com", normalized)
+        logger.info(f"VK: нормализован домен -> {normalized}")
 
     # Настройки пользователя (качество)
     s = user_settings.get(user_id) if user_id else None

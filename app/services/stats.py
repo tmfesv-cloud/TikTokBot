@@ -15,12 +15,13 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 # Порядок платформ для вывода
-PLATFORMS = ("tiktok", "instagram", "youtube", "pinterest")
+PLATFORMS = ("tiktok", "instagram", "youtube", "pinterest", "vk")
 PLATFORM_EMOJI = {
     "tiktok": "🎵",
     "instagram": "📸",
     "youtube": "▶️",
     "pinterest": "📌",
+    "vk": "🅥",
 }
 
 # --- Подключение к Redis (если настроен) ---
