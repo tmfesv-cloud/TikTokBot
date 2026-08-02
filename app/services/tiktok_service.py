@@ -54,17 +54,35 @@ _VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _MEDIA_EXTS = _VIDEO_EXTS | _IMAGE_EXTS
 
-# Поддерживаемые платформы: TikTok, Instagram, YouTube, Pinterest, VK
+# Поддерживаемые платформы: TikTok, Instagram, YouTube, Pinterest, VK,
+# Rutube, Одноклассники, X/Twitter, Dailymotion, Likee, Vimeo, Twitch,
+# Tumblr, Bilibili, Xiaohongshu
+#
+# Короткие домены (x.com, ok.ru, dai.ly, pin.it, youtu.be, vk.com) матчим
+# с обязательной границей слова + не-буква/цифра перед доменом, чтобы не
+# ловить подстроки в чужих URL (example.com/x.com/...).
 _MEDIA_URL_RE = re.compile(
     r"(?:https?://)?"
     r"(?:"
     r"(?:www\.|m\.|vm\.|vt\.|v\.)?(?:tiktok|tik-tok)\.com"
     r"|(?:www\.|m\.)?instagram\.com"
-    r"|(?:www\.|m\.)?youtu(?:\.be|be\.com)"
-    r"|(?:www\.|m\.)?pinterest\.(?:com|co\.[a-z]{2})"
-    r"|pin\.it"
-    r"|(?:www\.|m\.)?vk\.(?:com|ru)"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?youtu(?:\.be|be\.com)"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?pinterest\.(?:com|co\.[a-z]{2})"
+    r"|(?<![A-Za-z0-9])pin\.it"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?vk\.(?:com|ru)"
     r"|(?:www\.|m\.)?vkvideo\.ru"
+    r"|(?:www\.|m\.)?rutube\.ru"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?(?:ok|odnoklassniki)\.ru"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?(?:x|twitter)\.com"
+    r"|(?:www\.|m\.)?dailymotion\.com"
+    r"|(?<![A-Za-z0-9])dai\.ly"
+    r"|(?:www\.|m\.)?likee\.(?:com|video)"
+    r"|(?:www\.|m\.)?vimeo\.com"
+    r"|(?:www\.|m\.)?twitch\.tv"
+    r"|(?:www\.)?tumblr\.com"
+    r"|(?:www\.|m\.)?bilibili\.com"
+    r"|(?:www\.)?xiaohongshu\.com"
+    r"|(?<![A-Za-z0-9])xhslink\.com"
     r")"
     r"/\S+",
     re.IGNORECASE,
@@ -185,6 +203,15 @@ def extract_media_url(text: str) -> str | None:
     m = _MEDIA_URL_RE.search(text or "")
     if not m:
         return None
+    # Короткие домены (x.com, ok.ru, pin.it...) могут встретиться как подстрока
+    # в путях чужих ссылок (example.com/x.com/...). Если перед ссылкой стоит
+    # буква/цифра/точка/слеш — это не хост, отбрасываем. Схема "//" (https://)
+    # перед ссылкой — нормально, это начало хоста.
+    if m.start() > 0:
+        prev = text[m.start() - 1]
+        if prev.isalnum() or prev in "./?&#=_-":
+            if not (prev == "/" and m.start() >= 2 and text[m.start() - 2] == "/"):
+                return None
     url = m.group(0).rstrip(".,;:!?)]}>\"'")
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -192,7 +219,7 @@ def extract_media_url(text: str) -> str | None:
 
 
 def detect_platform(url: str) -> str:
-    """Определяет платформу по ссылке: tiktok/instagram/youtube/pinterest/vk."""
+    """Определяет платформу по ссылке: tiktok/instagram/youtube/pinterest/vk/..."""
     if "tiktok" in url or "tik-tok" in url:
         return "tiktok"
     if "instagram" in url:
@@ -203,6 +230,26 @@ def detect_platform(url: str) -> str:
         return "pinterest"
     if "vk.com" in url or "vk.ru" in url or "vkvideo.ru" in url:
         return "vk"
+    if "rutube.ru" in url:
+        return "rutube"
+    if "ok.ru" in url or "odnoklassniki.ru" in url:
+        return "ok"
+    if "twitter.com" in url or "x.com" in url:
+        return "twitter"
+    if "dailymotion.com" in url or "dai.ly" in url:
+        return "dailymotion"
+    if "likee.com" in url or "likee.video" in url:
+        return "likee"
+    if "vimeo.com" in url:
+        return "vimeo"
+    if "twitch.tv" in url:
+        return "twitch"
+    if "tumblr.com" in url:
+        return "tumblr"
+    if "bilibili.com" in url:
+        return "bilibili"
+    if "xiaohongshu.com" in url or "xhslink.com" in url:
+        return "xiaohongshu"
     return "other"
 
 
@@ -291,7 +338,8 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         logger.warning(f"Неподдерживаемый URL {url}: {e}")
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube, Pinterest, VK."
+            "YouTube, Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
+            "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         ) from e
     except yt_dlp.utils.DownloadError as e:
         _rmtree(req_dir)
@@ -721,7 +769,8 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
     if not normalized:
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube, Pinterest, VK."
+            "YouTube, Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
+            "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         )
 
     # vk.ru — тот же сайт, но yt-dlp знает только vk.com
