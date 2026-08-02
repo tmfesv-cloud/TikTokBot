@@ -23,7 +23,8 @@ def format_settings(s: user_settings.UserSettings) -> str:
     return (
         "⚙️ <b>Настройки скачивания</b>\n\n"
         f"🎥 Качество: <b>{'HD' if s.hd else 'SD'}</b>\n"
-        f"🎵 Аудио отдельно: <b>{'Вкл' if s.send_audio else 'Выкл'}</b>\n\n"
+        f"🎵 Аудио отдельно: <b>{'Вкл' if s.send_audio else 'Выкл'}</b>\n"
+        f"🔊 Улучшить звук TikTok: <b>{'Вкл' if s.improve_audio else 'Выкл'}</b>\n\n"
         "Меняй значение кнопкой ниже 👇"
     )
 
@@ -38,6 +39,10 @@ def build_kb(s: user_settings.UserSettings) -> InlineKeyboardMarkup:
     kb.button(
         text=f"🎵 Аудио: {'Вкл' if s.send_audio else 'Выкл'}",
         callback_data="set:audio",
+    )
+    kb.button(
+        text=f"🔊 Звук TikTok: {'Вкл' if s.improve_audio else 'Выкл'}",
+        callback_data="set:improve",
     )
     kb.button(text="❌ Закрыть", callback_data="set:close")
     kb.adjust(1)
@@ -80,6 +85,8 @@ async def on_setting(callback: CallbackQuery) -> None:
         s.hd = not s.hd
     elif action == "audio":
         s.send_audio = not s.send_audio
+    elif action == "improve":
+        s.improve_audio = not s.improve_audio
     elif action == "close":
         await callback.message.delete()
         await callback.answer()

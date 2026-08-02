@@ -362,15 +362,17 @@ def _tikwm_author(data: dict) -> str:
 
 
 async def _improve_tiktok_audio(
-    result: DownloadResult, url: str
+    result: DownloadResult, url: str, user_id: int | None = None
 ) -> DownloadResult:
     """Подмешивает оригинальный трек TikTok вместо слабой дорожки (~64 kbps).
 
-    Улучшение только если включено Config.IMPROVE_TIKTOK_AUDIO (выкл по умолчанию).
-    Берёт music URL из tikwm, качает mp3 и через ffmpeg заменяет аудио-дорожку
-    видео на него. При любой ошибке возвращает исходный result — без падений.
+    Улучшение только если у пользователя включена настройка improve_audio
+    (панель /settings). Берёт music URL из tikwm, качает mp3 и через ffmpeg
+    заменяет аудио-дорожку видео на него. При любой ошибке возвращает исходный
+    result — без падений.
     """
-    if not Config.IMPROVE_TIKTOK_AUDIO:
+    s = user_settings.get(user_id) if user_id else None
+    if not (s and s.improve_audio):
         return result
     if not result.is_video or not result.files or not result._dir:
         return result
@@ -755,7 +757,7 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
             )
             # TikTok: улучшаем звук (если включено в настройках)
             if is_tiktok and result.is_video:
-                return await _improve_tiktok_audio(result, normalized)
+                return await _improve_tiktok_audio(result, normalized, user_id)
             return result
         except (VideoTooLargeError, UnsupportedUrlError):
             # Эти ошибки уже точные — fallback не нужен
@@ -769,7 +771,7 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
                         normalized, out_dir, max_bytes, hd
                     )
                     if result.is_video:
-                        return await _improve_tiktok_audio(result, normalized)
+                        return await _improve_tiktok_audio(result, normalized, user_id)
                     return result
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise

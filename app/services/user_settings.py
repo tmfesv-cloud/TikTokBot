@@ -9,6 +9,7 @@ class UserSettings:
 
     hd: bool = True       # HD-качество
     send_audio: bool = False  # отправлять аудио отдельно
+    improve_audio: bool = False  # улучшать звук TikTok (подмешивать оригинальный трек)
 
 
 # user_id -> настройки
