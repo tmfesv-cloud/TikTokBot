@@ -29,24 +29,44 @@ _workers: dict[int, asyncio.Task] = {}
 def _extract_audio_sync(video_path: Path, out_dir: Path) -> Path | None:
     """Извлекает аудио-дорожку из видео через ffmpeg.
 
-    Возвращает путь к mp3 или None (если ffmpeg недоступен или нечего извлекать).
+    Сначала пробуем скопировать дорожку как есть в .m4a — без потерь
+    (исходный битрейт сохраняется). Если кодек несовместим с .m4a
+    (например Opus у YouTube) — перекодируем в AAC 192k.
+
+    Возвращает путь к файлу или None (если ffmpeg недоступен или нечего извлекать).
     """
-    audio_path = out_dir / "audio.mp3"
+    m4a_path = out_dir / "audio.m4a"
     try:
+        # 1) Копия без перекодирования — качество как в источнике
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
                 "-vn",
-                "-acodec", "libmp3lame",
-                "-q:a", "4",
-                str(audio_path),
+                "-c:a", "copy",
+                str(m4a_path),
             ],
             capture_output=True,
             timeout=120,
         )
-        if result.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 0:
-            return audio_path
+        if result.returncode == 0 and m4a_path.exists() and m4a_path.stat().st_size > 0:
+            return m4a_path
+
+        # 2) Кодек не влез в .m4a — перекодируем в AAC 192k (без потерь не вышло)
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-vn",
+                "-acodec", "aac",
+                "-b:a", "192k",
+                str(m4a_path),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode == 0 and m4a_path.exists() and m4a_path.stat().st_size > 0:
+            return m4a_path
     except FileNotFoundError:
         logger.debug("ffmpeg не найден — извлечение аудио невозможно")
     except subprocess.TimeoutExpired:
