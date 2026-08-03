@@ -1070,6 +1070,103 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise TiktokError("tikwm: плохой ответ") from e
 
 
+# --- YouTube fallback через Invidious --------------------------------------
+
+# Публичные Invidious-инстансы — прокси-серверы YouTube, созданные именно
+# для обхода блокировок. Используются, когда yt-dlp на Render не может скачать
+# YouTube напрямую (YouTube блокирует IP дата-центров: "Sign in to confirm").
+# Инстансы иногда умирают — пробуем по очереди.
+_INVIDIOUS_INSTANCES = [
+    "https://invidious.nerdvpn.de",
+    "https://invidious.f5.si",
+    "https://inv.nadeko.net",
+    "https://invidious.tiekoetter.com",
+    "https://yt.chocolatemoo53.com",
+    "https://yewtu.be",
+]
+
+# itag -> приоритет (чем выше качество, тем ниже число = лучше)
+_YT_PROGRESSIVE_ITAGS = {22: 0, 18: 1, 43: 2, 44: 2, 17: 3}
+
+
+def _extract_youtube_id(url: str) -> str | None:
+    """Достаёт ID видео из YouTube-ссылки (watch/shorts/youtu.be/embed)."""
+    m = re.search(r"(?:youtu\.be/|v=|shorts/|embed/)([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
+async def _download_via_invidious(
+    url: str, out_dir: Path, max_bytes: int
+) -> DownloadResult:
+    """Запасное скачивание YouTube через публичные Invidious-инстансы.
+
+    Инстанс сам качает видео с YouTube (со своих серверов/IP) и отдаёт
+    прямую ссылку на файл. Нам остаётся только скачать её.
+    Бросает TiktokError, если ни один инстанс не смог.
+    """
+    video_id = _extract_youtube_id(url)
+    if not video_id:
+        raise TiktokError("Не удалось распознать YouTube-ссылку.")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    req_dir = out_dir / f"{int(time.time() * 1000)}-inv-{uuid.uuid4().hex[:8]}"
+    req_dir.mkdir()
+
+    headers = {"User-Agent": _HTTP_HEADERS["User-Agent"], "Accept": "application/json"}
+
+    for host in _INVIDIOUS_INSTANCES:
+        try:
+            api_url = f"{host}/api/v1/videos/{video_id}?local=true"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    api_url, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    payload = await resp.json(content_type=None)
+
+            title = payload.get("title") or ""
+            author = (payload.get("author") or "") or ""
+
+            # formatStreams — прогрессивные mp4 с видео+аудио (самый простой путь)
+            streams = [
+                f for f in (payload.get("formatStreams") or [])
+                if f.get("url") and "video/mp4" in (f.get("type") or "")
+            ]
+            # Сортируем по качеству (itag 22 = 720p, 18 = 360p...)
+            streams.sort(key=lambda f: _YT_PROGRESSIVE_ITAGS.get(int(f.get("itag") or 0), 99))
+            if not streams:
+                logger.info(f"Invidious {host}: нет прогрессивных mp4-форматов")
+                continue
+
+            stream = streams[0]
+            dest = req_dir / "video.mp4"
+            async with aiohttp.ClientSession() as session:
+                await _download_file(session, stream["url"], dest, max_bytes)
+
+            logger.info(f"Invidious {host}: скачано ({dest.stat().st_size // 1024} КБ)")
+            return DownloadResult(
+                files=[dest],
+                is_video=True,
+                title=title,
+                author=author,
+                _dir=req_dir,
+            )
+        except VideoTooLargeError:
+            _rmtree(req_dir)
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            logger.warning(f"Invidious {host}: не сработал ({e})")
+            continue
+
+    _rmtree(req_dir)
+    raise TiktokError(
+        "😔 YouTube заблокировал IP сервера, а запасные сервисы не ответили. "
+        "Попробуй позже или другое видео."
+    )
+
+
 async def download(
     url: str,
     user_id: int | None = None,
@@ -1105,6 +1202,8 @@ async def download(
 
     # TikTok-специфичный fallback через tikwm.com
     is_tiktok = bool(re.search(r"(?:tiktok|tik-tok)\.com", normalized))
+    # YouTube — есть запасной путь через Invidious (см. _download_via_invidious)
+    is_youtube = bool(re.search(r"(?:youtube\.com|youtu\.be)", normalized))
     # Pinterest — кастомный парсинг (yt-dlp не умеет картинки)
     is_pinterest = bool(re.search(r"pinterest\.(?:com|co\.\w+)|pin\.it", normalized))
 
@@ -1150,6 +1249,19 @@ async def download(
                     )
                     if result.is_video:
                         result = await _improve_tiktok_audio(result, normalized, user_id)
+                    return await _ensure_size(result)
+                except (VideoTooLargeError, VideoUnavailableError):
+                    raise
+                except TiktokError:
+                    raise primary from None
+            # YouTube: yt-dlp заблокирован (YouTube не любит IP дата-центров) —
+            # пробуем скачать через публичные Invidious-инстансы.
+            if is_youtube:
+                logger.info(f"yt-dlp не смог YouTube, пробуем Invidious: {normalized}")
+                try:
+                    result = await _download_via_invidious(
+                        normalized, out_dir, max_bytes
+                    )
                     return await _ensure_size(result)
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
