@@ -329,10 +329,31 @@ def _classify_error(msg: str) -> TiktokError:
 async def get_duration(url: str) -> int | None:
     """Быстро определяет длительность видео в секундах (без скачивания).
 
-    Нужно, чтобы решить, показывать ли "Скачиваю видео...". Для фотопостов
-    и недоступных ссылок возвращает None (y-dlp кидает Unsupported/Error) —
-    тогда хендлер не показывает статус.
+    Нужно, чтобы решить, показывать ли "Скачиваю видео...".
+    Для TikTok идём через tikwm — это быстрее и не создаёт лишней нагрузки
+    на сам TikTok (меньше шансов поймать rate-limit перед скачиванием).
+    Для остальных — yt-dlp. Фотопосты возвращают 0/None — статус не
+    показывается.
     """
+    if detect_platform(url) == "tiktok":
+        try:
+            async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
+                async with session.get(
+                    "https://www.tikwm.com/api/",
+                    params={"url": url, "hd": 1},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    payload = await resp.json(content_type=None)
+            if isinstance(payload, dict) and payload.get("code") in (0, 200):
+                data = payload.get("data") or {}
+                # Фото: images есть, duration=0. Видео: duration>0.
+                if data.get("images"):
+                    return 0
+                return data.get("duration") or None
+            return None
+        except Exception:
+            return None
+
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
     if Config.COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
@@ -883,7 +904,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
                         break
                     if attempt == 4:
                         break
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1.5)
             _rmtree(req_dir)
             raise last_error if last_error else VideoUnavailableError("😔 Не удалось скачать.")
 
@@ -897,10 +918,18 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise TiktokError("tikwm: плохой ответ") from e
 
 
-async def download(url: str, user_id: int | None = None) -> DownloadResult:
+async def download(
+    url: str,
+    user_id: int | None = None,
+    is_tiktok_photo: bool | None = None,
+) -> DownloadResult:
     """Скачивает видео или фотопост по ссылке.
 
     user_id — для применения настроек пользователя (качество).
+    is_tiktok_photo — если заранее известно, что это TikTok-фотопост
+    (хендлер узнал через get_duration), идём сразу в tikwm, минуя
+    yt-dlp (он фотопосты TikTok не умеет — только тратит время
+    и создаёт лишнюю нагрузку на TikTok). None — не знаем, решаем по факту.
     Бросает TiktokError при любых проблемах.
     """
     # Сразу отсекаем неподдерживаемые ссылки
@@ -940,6 +969,12 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
                 return await _ensure_size(result)
             except TiktokError:
                 raise
+
+        # TikTok-фотопост: yt-dlp его не умеет — сразу идём в tikwm,
+        # не тратя время на заведомо провальный запрос к yt-dlp.
+        if is_tiktok and is_tiktok_photo:
+            result = await _download_via_tikwm(normalized, out_dir, max_bytes, hd)
+            return await _ensure_size(result)
 
         # Остальное — через yt-dlp
         try:

@@ -171,10 +171,14 @@ async def _handle_download_inner(message: Message, url: str) -> None:
     # (дольше 2 минут). Короткие и фотопосты скачиваются быстро — статус
     # не нужен.
     status_msg = None
+    is_tiktok_photo = None
     try:
         duration = await tiktok_service.get_duration(url)
         if duration and duration > 120:
             status_msg = await message.answer("⏳ Скачиваю видео...", parse_mode=None)
+        # get_duration для TikTok-фото возвращает 0 — сразу идём в tikwm
+        elif duration == 0 and tiktok_service.detect_platform(url) == "tiktok":
+            is_tiktok_photo = True
     except Exception:
         pass  # не смогли узнать длительность — просто не показываем статус
 
@@ -189,7 +193,9 @@ async def _handle_download_inner(message: Message, url: str) -> None:
     result = None
     s = user_settings.get(user_id)
     try:
-        result = await tiktok_service.download(url, user_id=user_id)
+        result = await tiktok_service.download(
+            url, user_id=user_id, is_tiktok_photo=is_tiktok_photo
+        )
     except tiktok_service.TiktokError as e:
         await _cleanup_status()
         await message.answer(str(e), parse_mode=None)
