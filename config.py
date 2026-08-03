@@ -47,6 +47,11 @@ class Config:
     # ВРЕМЕННО (диагностика): показывать реальный текст ошибки yt-dlp в чате
     DEBUG_ERRORS: bool = os.getenv("DEBUG_ERRORS", "False").lower() == "true"
 
+    # Клиент YouTube для yt-dlp (android / android_music / ios / tv / web).
+    # Иногда помогает обойти "Sign in to confirm you're not a bot" — мобильные
+    # клиенты ходят по другим API, которые блокируются реже. Пусто — дефолт.
+    YT_CLIENT: str = os.getenv("YT_CLIENT", "")
+
     @classmethod
     def validate(cls) -> list[str]:
         """Проверяет, что все необходимые переменные заданы."""

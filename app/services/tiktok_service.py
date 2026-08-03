@@ -120,6 +120,13 @@ _JS_RUNTIMES = {
 def _js_opts(opts: dict) -> dict:
     """Добавляет JS runtime в опции yt-dlp (для YouTube)."""
     opts["js_runtimes"] = _JS_RUNTIMES
+    # Если задан YT_CLIENT (android/ios/tv...) — ходить к YouTube этим клиентом.
+    # Мобильные/телевизорные клиенты используют другие API, которые иногда
+    # не требуют "Sign in to confirm you're not a bot".
+    client = Config.YT_CLIENT
+    if client:
+        opts.setdefault("extractor_args", {})
+        opts["extractor_args"]["youtube"] = {"player_client": [client]}
     return opts
 
 
