@@ -764,84 +764,107 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
     req_dir = out_dir / f"{int(time.time() * 1000)}-tikwm-{uuid.uuid4().hex[:8]}"
     req_dir.mkdir()
 
+    async def _try_once(session: aiohttp.ClientSession) -> DownloadResult:
+        """Один цикл: запрос tikwm + загрузка файлов.
+
+        Возвращает результат или бросает VideoUnavailableError, если файлы
+        не скачались. Подписанные ссылки tikwm истекают (CDN отдаёт 403),
+        поэтому при неудаче вызывающий перезапрашивает свежие ссылки.
+        """
+        async with session.get(
+            "https://www.tikwm.com/api/",
+            params={"url": url, "hd": 1 if hd else 0},
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            payload = await resp.json(content_type=None)
+
+        if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
+            raise VideoUnavailableError(
+                "😔 Не удалось скачать это видео. Возможно, оно удалено "
+                "или ссылка битая."
+            )
+
+        data = payload.get("data") or {}
+        images = data.get("images") or []
+        video_url = data.get("hdplay") or data.get("play")
+
+        # Фотопост — качаем все фото + музыку
+        if images:
+            files: list[Path] = []
+            for i, img_url in enumerate(images[:20], 1):
+                dest = req_dir / f"{i:02d}.jpg"
+                try:
+                    await _download_file(session, img_url, dest, max_bytes)
+                    files.append(dest)
+                except VideoTooLargeError:
+                    raise
+                except VideoUnavailableError:
+                    continue  # одно фото не скачалось — пробуем остальные
+            if not files:
+                raise VideoUnavailableError("😔 Не удалось скачать фотопост.")
+
+            # Качаем аудио музыки (если есть)
+            audio_file = None
+            music_url = data.get("music")
+            if music_url:
+                audio_dest = req_dir / "music.mp3"
+                try:
+                    await _download_file(session, music_url, audio_dest, max_bytes)
+                    if audio_dest.stat().st_size > 0:
+                        audio_file = audio_dest
+                except (VideoTooLargeError, VideoUnavailableError):
+                    pass  # аудио необязательно — если не скачалось, просто не отправим
+
+            return DownloadResult(
+                files=files,
+                is_video=False,
+                title=data.get("title") or "",
+                author=_tikwm_author(data),
+                audio_file=audio_file,
+                _dir=req_dir,
+            )
+
+        # Видео — качаем один файл
+        if video_url:
+            dest = req_dir / "video.mp4"
+            try:
+                await _download_file(session, video_url, dest, max_bytes)
+            except (VideoTooLargeError, VideoUnavailableError):
+                raise
+            return DownloadResult(
+                files=[dest],
+                is_video=True,
+                title=data.get("title") or "",
+                author=_tikwm_author(data),
+                duration=data.get("duration") or None,
+                _dir=req_dir,
+            )
+
+        raise VideoUnavailableError("😔 Не удалось получить ссылки на файлы.")
+
     try:
         async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
-            # 1. Узнаём прямые ссылки через API (hd=1/0 — качество)
-            async with session.get(
-                "https://www.tikwm.com/api/",
-                params={"url": url, "hd": 1 if hd else 0},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                payload = await resp.json(content_type=None)
-
-            if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
-                _rmtree(req_dir)
-                raise VideoUnavailableError(
-                    "😔 Не удалось скачать это видео. Возможно, оно удалено "
-                    "или ссылка битая."
-                )
-
-            data = payload.get("data") or {}
-            images = data.get("images") or []
-            video_url = data.get("hdplay") or data.get("play")
-
-            # 2. Фотопост — качаем все фото + музыку
-            if images:
-                files: list[Path] = []
-                for i, img_url in enumerate(images[:20], 1):
-                    dest = req_dir / f"{i:02d}.jpg"
-                    try:
-                        await _download_file(session, img_url, dest, max_bytes)
-                        files.append(dest)
-                    except VideoTooLargeError:
-                        _rmtree(req_dir)
-                        raise
-                    except VideoUnavailableError:
-                        continue  # одно фото не скачалось — пробуем остальные
-                if not files:
-                    _rmtree(req_dir)
-                    raise VideoUnavailableError("😔 Не удалось скачать фотопост.")
-
-                # Качаем аудио музыки (если есть)
-                audio_file = None
-                music_url = data.get("music")
-                if music_url:
-                    audio_dest = req_dir / "music.mp3"
-                    try:
-                        await _download_file(session, music_url, audio_dest, max_bytes)
-                        if audio_dest.stat().st_size > 0:
-                            audio_file = audio_dest
-                    except (VideoTooLargeError, VideoUnavailableError):
-                        pass  # аудио необязательно — если не скачалось, просто не отправим
-
-                return DownloadResult(
-                    files=files,
-                    is_video=False,
-                    title=data.get("title") or "",
-                    author=_tikwm_author(data),
-                    audio_file=audio_file,
-                    _dir=req_dir,
-                )
-
-            # 3. Видео — качаем один файл
-            if video_url:
-                dest = req_dir / "video.mp4"
+            # Подписанные CDN-ссылки tikwm быстро истекают (403). Если файлы
+            # не скачались — перезапрашиваем свежие ссылки, до 3 циклов.
+            last_error: Exception | None = None
+            for attempt in range(5):
                 try:
-                    await _download_file(session, video_url, dest, max_bytes)
-                except (VideoTooLargeError, VideoUnavailableError):
+                    return await _try_once(session)
+                except VideoTooLargeError:
                     _rmtree(req_dir)
                     raise
-                return DownloadResult(
-                    files=[dest],
-                    is_video=True,
-                    title=data.get("title") or "",
-                    author=_tikwm_author(data),
-                    duration=data.get("duration") or None,
-                    _dir=req_dir,
-                )
-
+                except VideoUnavailableError as e:
+                    last_error = e
+                    # tikwm ответил, что видео удалено/битая ссылка — повторять
+                    # бессмысленно. Ошибки "Не удалось скачать фотопост/файлы
+                    # с CDN" — истёкшие подписанные ссылки, стоит перезапросить.
+                    if "удалено" in str(e):
+                        break
+                    if attempt == 4:
+                        break
+                    await asyncio.sleep(3)
             _rmtree(req_dir)
-            raise VideoUnavailableError("😔 Не удалось получить ссылки на файлы.")
+            raise last_error if last_error else VideoUnavailableError("😔 Не удалось скачать.")
 
     except aiohttp.ClientError as e:
         _rmtree(req_dir)
