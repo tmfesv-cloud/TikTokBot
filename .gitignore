@@ -26,3 +26,7 @@ Thumbs.db
 # Скачанные файлы
 downloads/*
 !downloads/.gitkeep
+
+# Cookies (секреты — не в репо!)
+cookies*.txt
+cookies_bot.txt
