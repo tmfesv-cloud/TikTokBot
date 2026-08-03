@@ -167,28 +167,42 @@ async def _handle_download_inner(message: Message, url: str) -> None:
     tiktok_service.mark_used(user_id)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
 
-    # Фидбек — чтобы пользователь видел, что бот работает (большие видео качаются долго)
-    status_msg = await message.answer(
-        "⏳ Скачиваю видео...", parse_mode=None
-    )
+    # Фидбек: "Скачиваю видео..." показываем только если скачивание идёт
+    # дольше 5 сек (большие файлы). Мелкие успевают скачаться быстрее —
+    # сообщение не появится вовсе.
+    status_msg = None
+
+    async def _send_status_later() -> None:
+        nonlocal status_msg
+        await asyncio.sleep(5)
+        status_msg = await message.answer("⏳ Скачиваю видео...", parse_mode=None)
+
+    status_task = asyncio.create_task(_send_status_later())
+
+    async def _cleanup_status() -> None:
+        nonlocal status_msg
+        status_task.cancel()
+        try:
+            await status_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
     result = None
     s = user_settings.get(user_id)
     try:
         result = await tiktok_service.download(url, user_id=user_id)
     except tiktok_service.TiktokError as e:
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        await _cleanup_status()
         await message.answer(str(e), parse_mode=None)
         return
     except Exception as e:
         logger.exception(f"Ошибка скачивания для {user_id}")
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        await _cleanup_status()
         await message.answer(
             "😔 Что-то пошло не так. Попробуй ещё раз позже.", parse_mode=None
         )
@@ -241,18 +255,12 @@ async def _handle_download_inner(message: Message, url: str) -> None:
                     logger.warning(f"Не удалось отправить аудио: {e}")
     except Exception as e:
         logger.exception(f"Ошибка отправки файла для {user_id}")
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        await _cleanup_status()
         await message.answer(
             "😔 Не удалось отправить файл. Попробуй ещё раз.", parse_mode=None
         )
     finally:
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        await _cleanup_status()
         if result:
             result.cleanup()
 
