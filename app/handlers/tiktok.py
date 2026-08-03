@@ -167,25 +167,19 @@ async def _handle_download_inner(message: Message, url: str) -> None:
     tiktok_service.mark_used(user_id)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
 
-    # Фидбек: "Скачиваю видео..." показываем только если скачивание идёт
-    # дольше 5 сек (большие файлы). Мелкие успевают скачаться быстрее —
-    # сообщение не появится вовсе.
+    # Фидбек: "Скачиваю видео..." показываем только для длинных видео
+    # (дольше 2 минут). Короткие и фотопосты скачиваются быстро — статус
+    # не нужен.
     status_msg = None
-
-    async def _send_status_later() -> None:
-        nonlocal status_msg
-        await asyncio.sleep(5)
-        status_msg = await message.answer("⏳ Скачиваю видео...", parse_mode=None)
-
-    status_task = asyncio.create_task(_send_status_later())
+    try:
+        duration = await tiktok_service.get_duration(url)
+        if duration and duration > 120:
+            status_msg = await message.answer("⏳ Скачиваю видео...", parse_mode=None)
+    except Exception:
+        pass  # не смогли узнать длительность — просто не показываем статус
 
     async def _cleanup_status() -> None:
         nonlocal status_msg
-        status_task.cancel()
-        try:
-            await status_task
-        except (asyncio.CancelledError, Exception):
-            pass
         if status_msg is not None:
             try:
                 await status_msg.delete()

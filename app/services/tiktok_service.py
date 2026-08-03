@@ -326,6 +326,27 @@ def _classify_error(msg: str) -> TiktokError:
     )
 
 
+async def get_duration(url: str) -> int | None:
+    """Быстро определяет длительность видео в секундах (без скачивания).
+
+    Нужно, чтобы решить, показывать ли "Скачиваю видео...". Для фотопостов
+    и недоступных ссылок возвращает None (y-dlp кидает Unsupported/Error) —
+    тогда хендлер не показывает статус.
+    """
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
+    try:
+        info = await asyncio.to_thread(
+            lambda: yt_dlp.YoutubeDL(opts).extract_info(url, download=False)
+        )
+        return info.get("duration") if isinstance(info, dict) else None
+    except Exception:
+        return None
+
+
 def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> DownloadResult:
     """Блокирующая загрузка (вызывается в отдельном потоке)."""
     out_dir.mkdir(parents=True, exist_ok=True)
