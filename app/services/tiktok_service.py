@@ -335,6 +335,26 @@ async def get_duration(url: str) -> int | None:
     Для остальных — yt-dlp. Фотопосты возвращают 0/None — статус не
     показывается.
     """
+    return (await probe(url)).duration
+
+
+@dataclass
+class ProbeResult:
+    """Что узнали о ссылке до скачивания (без загрузки файлов)."""
+
+    is_playlist: bool = False          # ссылка ведёт на плейлист
+    playlist_count: int | None = None  # сколько роликов в плейлисте
+    duration: int | None = None        # длительность (у видео)
+    is_tiktok_photo: bool = False      # TikTok-фотопост
+
+
+async def probe(url: str) -> ProbeResult:
+    """Быстро узнаёт тип ссылки: видео / плейлист / TikTok-фото.
+
+    Один лёгкий запрос метаданных. Используется, чтобы решить:
+    - показывать ли "Скачиваю видео..." (длительность > 120 сек);
+    - спросить ли "Скачать весь плейлист?".
+    """
     if detect_platform(url) == "tiktok":
         try:
             async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
@@ -348,13 +368,18 @@ async def get_duration(url: str) -> int | None:
                 data = payload.get("data") or {}
                 # Фото: images есть, duration=0. Видео: duration>0.
                 if data.get("images"):
-                    return 0
-                return data.get("duration") or None
-            return None
+                    return ProbeResult(is_tiktok_photo=True)
+                return ProbeResult(duration=data.get("duration"))
+            return ProbeResult()
         except Exception:
-            return None
+            return ProbeResult()
 
-    opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": False,      # не резать плейлисты — узнаём про них
+        "extract_flat": True,     # только метаданные, без скачивания роликов
+    }
     if Config.COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
@@ -363,9 +388,45 @@ async def get_duration(url: str) -> int | None:
         info = await asyncio.to_thread(
             lambda: yt_dlp.YoutubeDL(opts).extract_info(url, download=False)
         )
-        return info.get("duration") if isinstance(info, dict) else None
     except Exception:
+        return ProbeResult()
+    if not isinstance(info, dict):
+        return ProbeResult()
+
+    if info.get("_type") == "playlist":
+        return ProbeResult(
+            is_playlist=True,
+            playlist_count=info.get("playlist_count"),
+        )
+    return ProbeResult(duration=info.get("duration"))
+
+
+def _get_playlist_urls_sync(url: str, limit: int) -> list[str] | None:
+    """Собирает прямые ссылки на ролики плейлиста (без скачивания)."""
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,  # берём только метаданные, не качаем ролики
+    }
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not isinstance(info, dict) or info.get("_type") != "playlist":
         return None
+    urls: list[str] = []
+    for e in (info.get("entries") or [])[:limit]:
+        u = e.get("url") if isinstance(e, dict) else None
+        if u and u.startswith("http"):
+            urls.append(u)
+    return urls or None
+
+
+async def get_playlist_urls(url: str, limit: int = 25) -> list[str] | None:
+    """Прямые ссылки на первые `limit` роликов плейлиста (или None)."""
+    return await asyncio.to_thread(_get_playlist_urls_sync, url, limit)
 
 
 def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> DownloadResult:
