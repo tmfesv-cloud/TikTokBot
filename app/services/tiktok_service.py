@@ -105,6 +105,18 @@ _HTTP_HEADERS = {
     "Referer": "https://www.tiktok.com/",
 }
 
+# JS runtime для yt-dlp. YouTube с версии 2025 требует JS для извлечения
+# видео; yt-dlp по умолчанию ищет только deno. На Render ставим nodejs,
+# локально node тоже почти всегда есть. Указываем явно, чтобы yt-dlp
+# не работал в урезанном режиме без JS.
+_JS_RUNTIMES = {"node": {"executable": "node"}}
+
+
+def _js_opts(opts: dict) -> dict:
+    """Добавляет JS runtime в опции yt-dlp (для YouTube)."""
+    opts["js_runtimes"] = _JS_RUNTIMES
+    return opts
+
 
 class TiktokError(Exception):
     """Базовая ошибка скачивания TikTok."""
@@ -295,7 +307,7 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
         opts["cookiefile"] = Config.COOKIES_FILE
-    return opts
+    return _js_opts(opts)
 
 
 def _classify_error(msg: str) -> TiktokError:
@@ -384,6 +396,7 @@ async def probe(url: str) -> ProbeResult:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
         opts["cookiefile"] = Config.COOKIES_FILE
+    _js_opts(opts)
     try:
         info = await asyncio.to_thread(
             lambda: yt_dlp.YoutubeDL(opts).extract_info(url, download=False)
@@ -412,6 +425,7 @@ def _get_playlist_urls_sync(url: str, limit: int) -> list[str] | None:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
         opts["cookiefile"] = Config.COOKIES_FILE
+    _js_opts(opts)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     if not isinstance(info, dict) or info.get("_type") != "playlist":
@@ -696,6 +710,7 @@ def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> D
         "retries": 3,
         "noprogress": True,
     }
+    _js_opts(opts)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.extract_info(m3u8_url, download=True)
