@@ -108,9 +108,13 @@ _HTTP_HEADERS = {
 
 # JS runtime для yt-dlp. YouTube с версии 2025 требует JS для извлечения
 # видео; yt-dlp по умолчанию ищет только deno. На Render ставим nodejs,
-# локально node тоже почти всегда есть. Указываем явно, чтобы yt-dlp
+# локально node тоже почти всегда есть. Указываем оба имени (node / nodejs —
+# в Debian-контейнерах бинарник может называться по-разному), чтобы yt-dlp
 # не работал в урезанном режиме без JS.
-_JS_RUNTIMES = {"node": {"executable": "node"}}
+_JS_RUNTIMES = {
+    "node": {"executable": "node"},
+    "nodejs": {"executable": "nodejs"},
+}
 
 
 def _js_opts(opts: dict) -> dict:
