@@ -118,6 +118,41 @@ def _js_opts(opts: dict) -> dict:
     return opts
 
 
+# Путь к файлу cookies, который бот сам создаёт из COOKIES_CONTENT
+_COOKIES_FILE_PATH = Path("cookies_bot.txt")
+
+
+def _ensure_cookies_file() -> str | None:
+    """Создаёт файл cookies из Config.COOKIES_CONTENT (для Render).
+
+    В переменную окружения удобно вставить весь текст cookies.txt —
+    бот запишет его в файл при первом скачивании и передаст yt-dlp.
+    Возвращает путь к файлу или None (если cookies не заданы).
+    """
+    content = Config.COOKIES_CONTENT.strip()
+    if not content:
+        return None
+    try:
+        _COOKIES_FILE_PATH.write_text(content, encoding="utf-8")
+        return str(_COOKIES_FILE_PATH)
+    except OSError as e:
+        logger.warning(f"Не удалось записать файл cookies: {e}")
+        return None
+
+
+def _cookies_opts(opts: dict) -> dict:
+    """Добавляет cookies в опции yt-dlp: из файла, содержимого или браузера."""
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
+    elif Config.COOKIES_CONTENT:
+        path = _ensure_cookies_file()
+        if path:
+            opts["cookiefile"] = path
+    elif Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    return opts
+
+
 class TiktokError(Exception):
     """Базовая ошибка скачивания TikTok."""
 
@@ -302,11 +337,8 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
     # VK и Rutube: склейка видео+аудио через ffmpeg (установлен в Dockerfile и на Render)
     if platform in ("vk", "rutube"):
         opts["merge_output_format"] = "mp4"
-    # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
-    if Config.COOKIES_FROM_BROWSER:
-        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
-    if Config.COOKIES_FILE:
-        opts["cookiefile"] = Config.COOKIES_FILE
+    # Cookies: из файла, содержимого (Render) или браузера
+    _cookies_opts(opts)
     return _js_opts(opts)
 
 
@@ -398,10 +430,7 @@ async def probe(url: str) -> ProbeResult:
         "noplaylist": False,      # не резать плейлисты — узнаём про них
         "extract_flat": True,     # только метаданные, без скачивания роликов
     }
-    if Config.COOKIES_FROM_BROWSER:
-        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
-    if Config.COOKIES_FILE:
-        opts["cookiefile"] = Config.COOKIES_FILE
+    _cookies_opts(opts)
     _js_opts(opts)
     try:
         info = await asyncio.to_thread(
@@ -427,10 +456,7 @@ def _get_playlist_urls_sync(url: str, limit: int) -> list[str] | None:
         "no_warnings": True,
         "extract_flat": True,  # берём только метаданные, не качаем ролики
     }
-    if Config.COOKIES_FROM_BROWSER:
-        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
-    if Config.COOKIES_FILE:
-        opts["cookiefile"] = Config.COOKIES_FILE
+    _cookies_opts(opts)
     _js_opts(opts)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)

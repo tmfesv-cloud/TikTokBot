@@ -40,6 +40,9 @@ class Config:
     COOKIES_FROM_BROWSER: str = os.getenv("COOKIES_FROM_BROWSER", "")
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
+    # COOKIES_CONTENT — само содержимое cookies.txt (для Render). Бот запишет
+    # его в файл при старте. Удобнее, чем грузить файл на сервер.
+    COOKIES_CONTENT: str = os.getenv("COOKIES_CONTENT", "")
 
     # ВРЕМЕННО (диагностика): показывать реальный текст ошибки yt-dlp в чате
     DEBUG_ERRORS: bool = os.getenv("DEBUG_ERRORS", "False").lower() == "true"
