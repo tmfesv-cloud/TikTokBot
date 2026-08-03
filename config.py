@@ -41,6 +41,9 @@ class Config:
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
 
+    # ВРЕМЕННО (диагностика): показывать реальный текст ошибки yt-dlp в чате
+    DEBUG_ERRORS: bool = os.getenv("DEBUG_ERRORS", "False").lower() == "true"
+
     @classmethod
     def validate(cls) -> list[str]:
         """Проверяет, что все необходимые переменные заданы."""
