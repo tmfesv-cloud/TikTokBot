@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import base64
 import logging
 import re
 import subprocess
@@ -122,18 +123,42 @@ def _js_opts(opts: dict) -> dict:
 _COOKIES_FILE_PATH = Path("cookies_bot.txt")
 
 
+def _decode_cookies_content(content: str) -> str:
+    """Превращает COOKIES_CONTENT в обычный текст cookies.txt.
+
+    Поддерживает два формата:
+    - обычный текст cookies.txt (с переносами строк и табуляциями);
+    - base64 от этого текста (так удобно вставлять в переменную окружения
+      Render одной строкой — многострочные значения неудобны).
+    """
+    s = content.strip()
+    # Текст cookies содержит переводы строк и табы — это признак, что base64 не нужен
+    if "\n" in s or "\t" in s:
+        return s
+    # Иначе пробуем декодировать base64 и проверяем, что получился cookie-файл
+    try:
+        decoded = base64.b64decode(s, validate=True).decode("utf-8")
+        if "Netscape" in decoded or "\t" in decoded:
+            return decoded
+    except Exception:
+        pass
+    # Не похоже ни на то, ни на другое — отдаём как есть
+    return s
+
+
 def _ensure_cookies_file() -> str | None:
     """Создаёт файл cookies из Config.COOKIES_CONTENT (для Render).
 
-    В переменную окружения удобно вставить весь текст cookies.txt —
-    бот запишет его в файл при первом скачивании и передаст yt-dlp.
-    Возвращает путь к файлу или None (если cookies не заданы).
+    В переменную окружения удобно вставить весь текст cookies.txt
+    (или его base64) — бот запишет его в файл при первом скачивании
+    и передаст yt-dlp. Возвращает путь к файлу или None (если cookies
+    не заданы).
     """
     content = Config.COOKIES_CONTENT.strip()
     if not content:
         return None
     try:
-        _COOKIES_FILE_PATH.write_text(content, encoding="utf-8")
+        _COOKIES_FILE_PATH.write_text(_decode_cookies_content(content), encoding="utf-8")
         return str(_COOKIES_FILE_PATH)
     except OSError as e:
         logger.warning(f"Не удалось записать файл cookies: {e}")
