@@ -158,7 +158,15 @@ def _ensure_cookies_file() -> str | None:
     if not content:
         return None
     try:
-        _COOKIES_FILE_PATH.write_text(_decode_cookies_content(content), encoding="utf-8")
+        decoded = _decode_cookies_content(content)
+        _COOKIES_FILE_PATH.write_text(decoded, encoding="utf-8")
+        # Диагностика: сколько строк cookies и какие домены
+        lines = [ln for ln in decoded.splitlines() if ln and not ln.startswith("#")]
+        domains = sorted({ln.split("\t")[0] for ln in lines if "\t" in ln})
+        logger.info(
+            f"Cookies: записано {len(lines)} строк из COOKIES_CONTENT, "
+            f"домены: {', '.join(domains[:5]) or 'нет'}"
+        )
         return str(_COOKIES_FILE_PATH)
     except OSError as e:
         logger.warning(f"Не удалось записать файл cookies: {e}")
