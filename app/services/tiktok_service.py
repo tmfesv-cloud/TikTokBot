@@ -447,7 +447,7 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         logger.warning(f"Неподдерживаемый URL {url}: {e}")
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube, Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
+            "Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
             "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         ) from e
     except yt_dlp.utils.DownloadError as e:
@@ -998,7 +998,7 @@ async def download(
     if not normalized:
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube, Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
+            "Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
             "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         )
 
