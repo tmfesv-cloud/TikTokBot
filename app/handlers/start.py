@@ -25,7 +25,6 @@ def help_text() -> str:
         "📱 <b>Поддерживаемые платформы:</b>\n"
         "• TikTok — видео и фотопосты\n"
         "• Instagram Reels — видео и карусели\n"
-        "• YouTube / YouTube Shorts — видео\n"
         "• VK Видео — видео\n"
         "• Rutube — видео\n"
         "• Pinterest — фото\n"
@@ -58,7 +57,7 @@ async def cmd_start(message: Message) -> None:
     )
     await message.answer(
         "👋 Привет! Я - пуфик, скачиваю видео и фото с 15+ платформ: "
-        "TikTok, Instagram, YouTube, VK, Rutube, Pinterest и других.\n\n"
+        "TikTok, Instagram, VK, Rutube, Pinterest и других.\n\n"
         "Просто пришли мне ссылку на видео — и я скачаю его без водяного знака 🎬\n\n"
         "Команды:\n"
         "/help — справка\n"
@@ -91,7 +90,7 @@ async def on_my_chat_member(update: ChatMemberUpdated) -> None:
         await update.bot.send_message(
             update.chat.id,
             "👋 Всем привет! Я пуфик — скачиваю видео и фото с TikTok, "
-            "Instagram, Pinterest и YouTube!\n\n"
+            "Instagram и Pinterest!\n\n"
             "Просто пришли мне ссылку в чат — и я пришлю готовый результат 🎬\n\n"
             "Команды:\n"
             "/help — справка\n"
