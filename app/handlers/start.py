@@ -32,6 +32,8 @@ def help_text() -> str:
         "• X / Twitter — видео\n"
         "• Dailymotion, Vimeo, Twitch — видео\n"
         "• Bilibili, Xiaohongshu — видео\n\n"
+        "🚀 С развитием бота будет появляться больше платформ — "
+        "в том числе YouTube.\n\n"
         "💡 <b>Команды:</b>\n"
         "• /settings — настройки скачивания\n"
         "• /clear — сбросить настройки\n"
