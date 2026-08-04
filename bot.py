@@ -27,6 +27,7 @@ from aiohttp import web
 
 from config import Config
 from app.handlers import admin, start, settings, tiktok
+from app.services import stats
 
 # Настройка логирования
 logging.basicConfig(
@@ -82,6 +83,14 @@ async def on_startup(bot: Bot) -> None:
         # Удаляем вебхук на случай если он был
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Вебхук удалён, работаем в режиме polling")
+
+    # Уведомить владельца о запуске/перезапуске (rate-limit против crash-loop спама)
+    await stats.notify_owner(
+        bot,
+        "🔄 Бот перезапустился и работает.",
+        rate_key="startup",
+        rate_ttl=1800,
+    )
 
 
 async def on_shutdown(bot: Bot) -> None:

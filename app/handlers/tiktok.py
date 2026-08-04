@@ -234,12 +234,33 @@ async def _handle_download_inner(
     except tiktok_service.TiktokError as e:
         await _cleanup_status()
         await message.answer(str(e), parse_mode=None)
+        # Уведомляем владельца о сбое платформы (не для «пользовательских» ошибок:
+        # слишком большое видео, видео удалено, неверная ссылка)
+        if not isinstance(
+            e,
+            (
+                tiktok_service.VideoTooLargeError,
+                tiktok_service.VideoUnavailableError,
+                tiktok_service.UnsupportedUrlError,
+            ),
+        ):
+            platform = tiktok_service.detect_platform(url)
+            await stats.notify_owner(
+                message.bot,
+                f"⚠️ Скачивание с {platform} падает: {e}",
+                rate_key=f"fail:{platform}",
+            )
         return
     except Exception as e:
         logger.exception(f"Ошибка скачивания для {user_id}")
         await _cleanup_status()
         await message.answer(
             "😔 Что-то пошло не так. Попробуй ещё раз позже.", parse_mode=None
+        )
+        await stats.notify_owner(
+            message.bot,
+            "💥 Неожиданная ошибка при скачивании. Смотри логи.",
+            rate_key="crash",
         )
         return
 

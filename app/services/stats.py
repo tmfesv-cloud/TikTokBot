@@ -281,3 +281,49 @@ def clear_feedback() -> int:
     count = len(_mem_feedback)
     _mem_feedback.clear()
     return count
+
+
+# --- Уведомления владельцу о сбоях ---
+_mem_alerts: dict[str, float] = {}  # rate-limit в памяти (без Redis)
+
+
+async def notify_owner(
+    bot,
+    text: str,
+    rate_key: str | None = None,
+    rate_ttl: int = 1800,
+) -> bool:
+    """Отправляет сообщение владельцу (OWNER_ID) в личку.
+
+    rate_key — если задан, уведомление с этим ключом уходит не чаще раза
+    в rate_ttl секунд. Нужно, чтобы не спамить владельцу, когда платформа
+    массово не отвечает (например, юзеры шлют YouTube-ссылки).
+
+    Возвращает True, если сообщение отправлено.
+    """
+    owner_id = Config.OWNER_ID
+    if not owner_id:
+        return False
+
+    if rate_key:
+        if _redis:
+            try:
+                ok = _redis.setnx(f"alerts:{rate_key}", "1")
+                if not ok:
+                    return False
+                _redis.expire(f"alerts:{rate_key}", rate_ttl)
+            except Exception:
+                pass  # Redis упал — не блокируем отправку
+        else:
+            now = time.time()
+            last = _mem_alerts.get(rate_key, 0.0)
+            if now - last < rate_ttl:
+                return False
+            _mem_alerts[rate_key] = now
+
+    try:
+        await bot.send_message(owner_id, text, parse_mode=None)
+        return True
+    except Exception as e:
+        logger.warning(f"Не удалось отправить уведомление владельцу: {e}")
+        return False
