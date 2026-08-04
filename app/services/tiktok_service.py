@@ -312,8 +312,8 @@ def _classify_error(msg: str) -> TiktokError:
         )
     if any(k in lower for k in ("blocked", "captcha", "verify")):
         return TiktokError(
-            "🛡 Сайт заблокировал запрос с этого IP. Попробуй другое видео "
-            "или другую ссылку."
+            "🛡 Платформа временно заблокировала запрос. "
+            "Попробуй другое видео или зайди позже."
         )
     if any(k in lower for k in ("404", "not found", "unavailable", "removed",
                                 "private", "account", "expired", "no longer exists")):
@@ -322,7 +322,7 @@ def _classify_error(msg: str) -> TiktokError:
         )
     # Всё остальное — общая ошибка без страшного технического текста
     return TiktokError(
-        "😔 Не удалось скачать это видео. Проверь ссылку и попробуй ещё раз."
+        "😔 Платформа временно недоступна. Попробуй позже или пришли другую ссылку."
     )
 
 
@@ -458,7 +458,7 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         _rmtree(req_dir)
         logger.exception(f"Неожиданная ошибка yt-dlp для {url}")
         raise TiktokError(
-            "😔 Что-то пошло не так при скачивании. Попробуй ещё раз."
+            "😔 Платформа временно недоступна. Попробуй позже."
         ) from e
 
     # Собираем скачанные файлы (1 видео или несколько фото)
