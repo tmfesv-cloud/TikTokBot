@@ -188,15 +188,6 @@ def main() -> None:
 
     _cleanup_old_downloads()
 
-    # Диагностика: есть ли node.js (JS runtime для YouTube в yt-dlp)
-    import shutil
-    node_path = shutil.which("node")
-    nodejs_path = shutil.which("nodejs")
-    logger.info(
-        f"JS runtime для YouTube: node={'найден' if node_path else 'НЕТ'} "
-        f"({node_path}), nodejs={'найден' if nodejs_path else 'НЕТ'} ({nodejs_path})"
-    )
-
     logger.info(f"TikTokBot запускается... Режим: {'webhook' if Config.USE_WEBHOOK else 'polling'}")
 
     try:

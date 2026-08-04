@@ -4,7 +4,6 @@
 """
 
 import asyncio
-import base64
 import logging
 import re
 import subprocess
@@ -105,96 +104,6 @@ _HTTP_HEADERS = {
     ),
     "Referer": "https://www.tiktok.com/",
 }
-
-# JS runtime для yt-dlp. YouTube с версии 2025 требует JS для извлечения
-# видео; yt-dlp по умолчанию ищет только deno. На Render ставим nodejs,
-# локально node тоже почти всегда есть. Указываем оба имени (node / nodejs —
-# в Debian-контейнерах бинарник может называться по-разному), чтобы yt-dlp
-# не работал в урезанном режиме без JS.
-_JS_RUNTIMES = {
-    "node": {"executable": "node"},
-    "nodejs": {"executable": "nodejs"},
-}
-
-
-def _js_opts(opts: dict) -> dict:
-    """Добавляет JS runtime в опции yt-dlp (для YouTube)."""
-    opts["js_runtimes"] = _JS_RUNTIMES
-    # Если задан YT_CLIENT (android/ios/tv...) — ходить к YouTube этим клиентом.
-    # Мобильные/телевизорные клиенты используют другие API, которые иногда
-    # не требуют "Sign in to confirm you're not a bot".
-    client = Config.YT_CLIENT
-    if client:
-        opts.setdefault("extractor_args", {})
-        opts["extractor_args"]["youtube"] = {"player_client": [client]}
-    return opts
-
-
-# Путь к файлу cookies, который бот сам создаёт из COOKIES_CONTENT
-_COOKIES_FILE_PATH = Path("cookies_bot.txt")
-
-
-def _decode_cookies_content(content: str) -> str:
-    """Превращает COOKIES_CONTENT в обычный текст cookies.txt.
-
-    Поддерживает два формата:
-    - обычный текст cookies.txt (с переносами строк и табуляциями);
-    - base64 от этого текста (так удобно вставлять в переменную окружения
-      Render одной строкой — многострочные значения неудобны).
-    """
-    s = content.strip()
-    # Текст cookies содержит переводы строк и табы — это признак, что base64 не нужен
-    if "\n" in s or "\t" in s:
-        return s
-    # Иначе пробуем декодировать base64 и проверяем, что получился cookie-файл
-    try:
-        decoded = base64.b64decode(s, validate=True).decode("utf-8")
-        if "Netscape" in decoded or "\t" in decoded:
-            return decoded
-    except Exception:
-        pass
-    # Не похоже ни на то, ни на другое — отдаём как есть
-    return s
-
-
-def _ensure_cookies_file() -> str | None:
-    """Создаёт файл cookies из Config.COOKIES_CONTENT (для Render).
-
-    В переменную окружения удобно вставить весь текст cookies.txt
-    (или его base64) — бот запишет его в файл при первом скачивании
-    и передаст yt-dlp. Возвращает путь к файлу или None (если cookies
-    не заданы).
-    """
-    content = Config.COOKIES_CONTENT.strip()
-    if not content:
-        return None
-    try:
-        decoded = _decode_cookies_content(content)
-        _COOKIES_FILE_PATH.write_text(decoded, encoding="utf-8")
-        # Диагностика: сколько строк cookies и какие домены
-        lines = [ln for ln in decoded.splitlines() if ln and not ln.startswith("#")]
-        domains = sorted({ln.split("\t")[0] for ln in lines if "\t" in ln})
-        logger.info(
-            f"Cookies: записано {len(lines)} строк из COOKIES_CONTENT, "
-            f"домены: {', '.join(domains[:5]) or 'нет'}"
-        )
-        return str(_COOKIES_FILE_PATH)
-    except OSError as e:
-        logger.warning(f"Не удалось записать файл cookies: {e}")
-        return None
-
-
-def _cookies_opts(opts: dict) -> dict:
-    """Добавляет cookies в опции yt-dlp: из файла, содержимого или браузера."""
-    if Config.COOKIES_FILE:
-        opts["cookiefile"] = Config.COOKIES_FILE
-    elif Config.COOKIES_CONTENT:
-        path = _ensure_cookies_file()
-        if path:
-            opts["cookiefile"] = path
-    elif Config.COOKIES_FROM_BROWSER:
-        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
-    return opts
 
 
 class TiktokError(Exception):
@@ -381,9 +290,12 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
     # VK и Rutube: склейка видео+аудио через ffmpeg (установлен в Dockerfile и на Render)
     if platform in ("vk", "rutube"):
         opts["merge_output_format"] = "mp4"
-    # Cookies: из файла, содержимого (Render) или браузера
-    _cookies_opts(opts)
-    return _js_opts(opts)
+    # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
+    return opts
 
 
 def _classify_error(msg: str) -> TiktokError:
@@ -408,13 +320,7 @@ def _classify_error(msg: str) -> TiktokError:
         return VideoUnavailableError(
             "😔 Видео не найдено. Возможно, оно удалено, скрыто или ссылка битая."
         )
-    # Всё остальное — общая ошибка без страшного технического текста.
-    # При DEBUG_ERRORS=True показываем реальный текст yt-dlp (для диагностики).
-    if Config.DEBUG_ERRORS:
-        return TiktokError(
-            "🔧 [debug] Не удалось скачать. Техническая ошибка:\n"
-            f"{msg[:500]}"
-        )
+    # Всё остальное — общая ошибка без страшного технического текста
     return TiktokError(
         "😔 Не удалось скачать это видео. Проверь ссылку и попробуй ещё раз."
     )
@@ -474,8 +380,10 @@ async def probe(url: str) -> ProbeResult:
         "noplaylist": False,      # не резать плейлисты — узнаём про них
         "extract_flat": True,     # только метаданные, без скачивания роликов
     }
-    _cookies_opts(opts)
-    _js_opts(opts)
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
     try:
         info = await asyncio.to_thread(
             lambda: yt_dlp.YoutubeDL(opts).extract_info(url, download=False)
@@ -500,8 +408,10 @@ def _get_playlist_urls_sync(url: str, limit: int) -> list[str] | None:
         "no_warnings": True,
         "extract_flat": True,  # берём только метаданные, не качаем ролики
     }
-    _cookies_opts(opts)
-    _js_opts(opts)
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     if not isinstance(info, dict) or info.get("_type") != "playlist":
@@ -786,7 +696,6 @@ def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> D
         "retries": 3,
         "noprogress": True,
     }
-    _js_opts(opts)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.extract_info(m3u8_url, download=True)
@@ -1070,103 +979,6 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise TiktokError("tikwm: плохой ответ") from e
 
 
-# --- YouTube fallback через Invidious --------------------------------------
-
-# Публичные Invidious-инстансы — прокси-серверы YouTube, созданные именно
-# для обхода блокировок. Используются, когда yt-dlp на Render не может скачать
-# YouTube напрямую (YouTube блокирует IP дата-центров: "Sign in to confirm").
-# Инстансы иногда умирают — пробуем по очереди.
-_INVIDIOUS_INSTANCES = [
-    "https://invidious.nerdvpn.de",
-    "https://invidious.f5.si",
-    "https://inv.nadeko.net",
-    "https://invidious.tiekoetter.com",
-    "https://yt.chocolatemoo53.com",
-    "https://yewtu.be",
-]
-
-# itag -> приоритет (чем выше качество, тем ниже число = лучше)
-_YT_PROGRESSIVE_ITAGS = {22: 0, 18: 1, 43: 2, 44: 2, 17: 3}
-
-
-def _extract_youtube_id(url: str) -> str | None:
-    """Достаёт ID видео из YouTube-ссылки (watch/shorts/youtu.be/embed)."""
-    m = re.search(r"(?:youtu\.be/|v=|shorts/|embed/)([A-Za-z0-9_-]{11})", url)
-    return m.group(1) if m else None
-
-
-async def _download_via_invidious(
-    url: str, out_dir: Path, max_bytes: int
-) -> DownloadResult:
-    """Запасное скачивание YouTube через публичные Invidious-инстансы.
-
-    Инстанс сам качает видео с YouTube (со своих серверов/IP) и отдаёт
-    прямую ссылку на файл. Нам остаётся только скачать её.
-    Бросает TiktokError, если ни один инстанс не смог.
-    """
-    video_id = _extract_youtube_id(url)
-    if not video_id:
-        raise TiktokError("Не удалось распознать YouTube-ссылку.")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    req_dir = out_dir / f"{int(time.time() * 1000)}-inv-{uuid.uuid4().hex[:8]}"
-    req_dir.mkdir()
-
-    headers = {"User-Agent": _HTTP_HEADERS["User-Agent"], "Accept": "application/json"}
-
-    for host in _INVIDIOUS_INSTANCES:
-        try:
-            api_url = f"{host}/api/v1/videos/{video_id}?local=true"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    api_url, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    payload = await resp.json(content_type=None)
-
-            title = payload.get("title") or ""
-            author = (payload.get("author") or "") or ""
-
-            # formatStreams — прогрессивные mp4 с видео+аудио (самый простой путь)
-            streams = [
-                f for f in (payload.get("formatStreams") or [])
-                if f.get("url") and "video/mp4" in (f.get("type") or "")
-            ]
-            # Сортируем по качеству (itag 22 = 720p, 18 = 360p...)
-            streams.sort(key=lambda f: _YT_PROGRESSIVE_ITAGS.get(int(f.get("itag") or 0), 99))
-            if not streams:
-                logger.info(f"Invidious {host}: нет прогрессивных mp4-форматов")
-                continue
-
-            stream = streams[0]
-            dest = req_dir / "video.mp4"
-            async with aiohttp.ClientSession() as session:
-                await _download_file(session, stream["url"], dest, max_bytes)
-
-            logger.info(f"Invidious {host}: скачано ({dest.stat().st_size // 1024} КБ)")
-            return DownloadResult(
-                files=[dest],
-                is_video=True,
-                title=title,
-                author=author,
-                _dir=req_dir,
-            )
-        except VideoTooLargeError:
-            _rmtree(req_dir)
-            raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
-            logger.warning(f"Invidious {host}: не сработал ({e})")
-            continue
-
-    _rmtree(req_dir)
-    raise TiktokError(
-        "😔 YouTube заблокировал IP сервера, а запасные сервисы не ответили. "
-        "Попробуй позже или другое видео."
-    )
-
-
 async def download(
     url: str,
     user_id: int | None = None,
@@ -1202,8 +1014,6 @@ async def download(
 
     # TikTok-специфичный fallback через tikwm.com
     is_tiktok = bool(re.search(r"(?:tiktok|tik-tok)\.com", normalized))
-    # YouTube — есть запасной путь через Invidious (см. _download_via_invidious)
-    is_youtube = bool(re.search(r"(?:youtube\.com|youtu\.be)", normalized))
     # Pinterest — кастомный парсинг (yt-dlp не умеет картинки)
     is_pinterest = bool(re.search(r"pinterest\.(?:com|co\.\w+)|pin\.it", normalized))
 
@@ -1249,19 +1059,6 @@ async def download(
                     )
                     if result.is_video:
                         result = await _improve_tiktok_audio(result, normalized, user_id)
-                    return await _ensure_size(result)
-                except (VideoTooLargeError, VideoUnavailableError):
-                    raise
-                except TiktokError:
-                    raise primary from None
-            # YouTube: yt-dlp заблокирован (YouTube не любит IP дата-центров) —
-            # пробуем скачать через публичные Invidious-инстансы.
-            if is_youtube:
-                logger.info(f"yt-dlp не смог YouTube, пробуем Invidious: {normalized}")
-                try:
-                    result = await _download_via_invidious(
-                        normalized, out_dir, max_bytes
-                    )
                     return await _ensure_size(result)
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise

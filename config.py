@@ -40,17 +40,6 @@ class Config:
     COOKIES_FROM_BROWSER: str = os.getenv("COOKIES_FROM_BROWSER", "")
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
-    # COOKIES_CONTENT — само содержимое cookies.txt (для Render). Бот запишет
-    # его в файл при старте. Удобнее, чем грузить файл на сервер.
-    COOKIES_CONTENT: str = os.getenv("COOKIES_CONTENT", "")
-
-    # ВРЕМЕННО (диагностика): показывать реальный текст ошибки yt-dlp в чате
-    DEBUG_ERRORS: bool = os.getenv("DEBUG_ERRORS", "False").lower() == "true"
-
-    # Клиент YouTube для yt-dlp (android / android_music / ios / tv / web).
-    # Иногда помогает обойти "Sign in to confirm you're not a bot" — мобильные
-    # клиенты ходят по другим API, которые блокируются реже. Пусто — дефолт.
-    YT_CLIENT: str = os.getenv("YT_CLIENT", "")
 
     @classmethod
     def validate(cls) -> list[str]:
