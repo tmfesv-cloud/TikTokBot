@@ -67,6 +67,7 @@ async def on_startup(bot: Bot) -> None:
     # Синяя кнопка меню с командами
     await bot.set_my_commands([
         BotCommand(command="help", description="Справка"),
+        BotCommand(command="invite", description="Пригласить друзей"),
         BotCommand(command="settings", description="Настройки скачивания"),
         BotCommand(command="clear", description="Сбросить настройки"),
     ])

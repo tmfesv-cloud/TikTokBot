@@ -184,6 +184,17 @@ def _summary_from_redis() -> str:
     else:
         lines.append("\nТоп пользователей:\n  Пока нет данных")
 
+    top_ref = _redis.zrevrange("ref:by_user", 0, 4, withscores=True)
+    if top_ref:
+        uids = [str(uid) for uid, _ in top_ref]
+        names = _redis.hmget("stats:names", *uids) if uids else []
+        lines.append("\n🤝 Топ приглашающих:")
+        for i, (uid, n) in enumerate(top_ref, 1):
+            name = names[i - 1] if names and names[i - 1] else str(uid)
+            lines.append(f"  {i}. <b>{escape(str(name))}</b> — {int(n)} пригл.")
+    else:
+        lines.append("\n🤝 Топ приглашающих:\n  Пока нет данных")
+
     lines.append(
         f"\n🕐 Бот работает: <b>{_fmt_duration(time.time() - started_at)}</b>"
     )
@@ -216,6 +227,17 @@ def _summary_from_memory() -> str:
             lines.append(f"  {i}. <b>{escape(name)}</b> — {n} скач.")
     else:
         lines.append("\nТоп пользователей:\n  Пока нет данных")
+
+    if _mem_ref_counts:
+        top = sorted(
+            _mem_ref_counts.items(), key=lambda kv: kv[1], reverse=True
+        )[:5]
+        lines.append("\n🤝 Топ приглашающих:")
+        for i, (uid, n) in enumerate(top, 1):
+            name = _mem.names.get(uid) or str(uid)
+            lines.append(f"  {i}. <b>{escape(name)}</b> — {n} пригл.")
+    else:
+        lines.append("\n🤝 Топ приглашающих:\n  Пока нет данных")
 
     lines.append(
         f"\n🕐 Бот работает: <b>{_fmt_duration(time.time() - _mem.started_at)}</b>"
@@ -327,3 +349,62 @@ async def notify_owner(
     except Exception as e:
         logger.warning(f"Не удалось отправить уведомление владельцу: {e}")
         return False
+
+
+# --- Реферальная система (без ограничений — только учёт приглашений) ---
+_mem_referrer: dict[int, int] = {}  # invited_id -> referrer_id (память)
+_mem_ref_counts: dict[int, int] = {}  # referrer_id -> count (память)
+
+
+def register_referral(user_id: int, code: str) -> dict | None:
+    """Обрабатывает переход по реферальной ссылке (?start=ref{id}).
+
+    Возвращает данные пригласившего (для приветствия и уведомления):
+    {"user_id", "name", "count"}. None — если код невалидный, приглашает
+    сам себя или переход уже был засчитан.
+    """
+    if not code.startswith("ref"):
+        return None
+    try:
+        referrer_id = int(code[3:])
+    except ValueError:
+        return None
+    if referrer_id <= 0 or referrer_id == user_id:
+        return None
+
+    if _redis:
+        try:
+            if _redis.exists(f"referrer:{user_id}"):
+                return None  # уже засчитан
+            _redis.set(f"referrer:{user_id}", str(referrer_id))
+            new_count = _redis.incr(f"referrals:{referrer_id}")
+            _redis.zincrby("ref:by_user", 1, str(referrer_id))
+            name = _redis.hget("stats:names", str(referrer_id)) or ""
+            return {
+                "user_id": referrer_id,
+                "name": name or str(referrer_id),
+                "count": new_count,
+            }
+        except Exception as e:
+            logger.warning(f"Не удалось записать реферал в Redis: {e}")
+
+    # Fallback в память (локальная разработка)
+    if user_id in _mem_referrer:
+        return None
+    _mem_referrer[user_id] = referrer_id
+    _mem_ref_counts[referrer_id] = _mem_ref_counts.get(referrer_id, 0) + 1
+    return {
+        "user_id": referrer_id,
+        "name": str(referrer_id),
+        "count": _mem_ref_counts[referrer_id],
+    }
+
+
+def get_invites_count(user_id: int) -> int:
+    """Сколько человек пришло по ссылке пользователя."""
+    if _redis:
+        try:
+            return int(_redis.get(f"referrals:{user_id}") or 0)
+        except Exception:
+            pass
+    return _mem_ref_counts.get(user_id, 0)

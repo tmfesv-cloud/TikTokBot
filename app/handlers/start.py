@@ -35,6 +35,7 @@ def help_text() -> str:
         "💡 <b>Команды:</b>\n"
         "• /settings — настройки скачивания\n"
         "• /clear — сбросить настройки\n"
+        "• /invite — пригласить друзей\n"
         "• /feedback — отправить идею или предложение\n"
         "• /help — эта справка\n\n"
         "⚠️ <b>Ограничения:</b>\n"
@@ -54,26 +55,73 @@ def help_text() -> str:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    """Приветствие."""
+    """Приветствие (в т.ч. переход по реферальной ссылке ?start=ref123)."""
     u = message.from_user
     stats.register_start(
         u.id, stats.make_name(u.username, u.first_name)
     )
-    await message.answer(
+
+    greeting = (
         "👋 Привет! Я - пуфик, скачиваю видео и фото с 15+ платформ: "
         "TikTok, Instagram, VK, Rutube, Pinterest и других.\n\n"
         "Просто пришли мне ссылку на видео — и я скачаю его без водяного знака 🎬\n\n"
         "Команды:\n"
         "/help — справка\n"
-        "/settings — настройки скачивания",
-        parse_mode="HTML",
+        "/invite — пригласить друзей\n"
+        "/settings — настройки скачивания"
     )
+
+    # Переход по реферальной ссылке (?start=ref123)
+    text = message.text or ""
+    if " " in text:
+        payload = text.split(maxsplit=1)[1].strip()
+        ref = stats.register_referral(u.id, payload)
+        if ref:
+            greeting = f"🤝 Тебя пригласил(а) {ref['name']}!\n\n" + greeting
+            # Уведомляем пригласившего
+            try:
+                await message.bot.send_message(
+                    ref["user_id"],
+                    f"🎉 По твоей ссылке пришёл новый друг! "
+                    f"Всего приглашено: {ref['count']}.",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+
+    await message.answer(greeting, parse_mode="HTML")
     # Отправляем стикер приветствия (указывается в .env, STICKER_FILE_ID)
     if Config.STICKER_FILE_ID:
         try:
             await message.answer_sticker(Config.STICKER_FILE_ID)
         except Exception as e:
             logger.warning(f"Не удалось отправить стикер: {e}")
+
+
+@router.message(Command("invite"))
+async def cmd_invite(message: Message) -> None:
+    """Реферальная ссылка: приглашай друзей — польза всем."""
+    user = message.from_user
+    try:
+        me = await message.bot.get_me()
+        username = me.username or ""
+    except Exception:
+        username = ""
+    if not username:
+        await message.answer(
+            "😔 Не могу получить ссылку. Попробуй позже.",
+            parse_mode=None,
+        )
+        return
+    link = f"https://t.me/{username}?start=ref{user.id}"
+    count = stats.get_invites_count(user.id)
+    await message.answer(
+        "🤝 <b>Твоя ссылка для приглашения:</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        f"Приглашено друзей: <b>{count}</b>\n"
+        "Приглашай друзей — им удобно, а бот станет лучше!",
+        parse_mode="HTML",
+    )
 
 
 @router.my_chat_member()
