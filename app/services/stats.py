@@ -221,3 +221,63 @@ def _summary_from_memory() -> str:
         f"\n🕐 Бот работает: <b>{_fmt_duration(time.time() - _mem.started_at)}</b>"
     )
     return "\n".join(lines)
+
+
+# --- Фидбек от пользователей ---
+_mem_feedback: list[dict] = []  # fallback в память
+
+
+def save_feedback(user_id: int, username: str | None, text: str) -> None:
+    """Сохраняет фидбек пользователя."""
+    timestamp = int(time.time())
+    if _redis:
+        try:
+            # Храним как JSON в Redis-списке (новые в конце)
+            import json
+            data = json.dumps({
+                "user_id": user_id,
+                "username": username or "",
+                "text": text,
+                "ts": timestamp,
+            }, ensure_ascii=False)
+            _redis.rpush("feedback:list", data)
+            return
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить фидбек в Redis: {e}")
+    # Fallback в память (последние 100)
+    _mem_feedback.append({
+        "user_id": user_id,
+        "username": username or "",
+        "text": text,
+        "ts": timestamp,
+    })
+    if len(_mem_feedback) > 100:
+        _mem_feedback.pop(0)
+
+
+def get_feedback(limit: int = 20) -> list[dict]:
+    """Возвращает последние N фидбеков (новые первыми)."""
+    if _redis:
+        try:
+            import json
+            items = _redis.lrange("feedback:list", -limit, -1)
+            result = [json.loads(item) for item in items]
+            return list(reversed(result))  # новые первыми
+        except Exception as e:
+            logger.warning(f"Не удалось получить фидбек из Redis: {e}")
+    # Fallback из памяти
+    return list(reversed(_mem_feedback[-limit:]))
+
+
+def clear_feedback() -> int:
+    """Очищает все фидбеки, возвращает количество удалённых."""
+    if _redis:
+        try:
+            count = _redis.llen("feedback:list") or 0
+            _redis.delete("feedback:list")
+            return count
+        except Exception:
+            pass
+    count = len(_mem_feedback)
+    _mem_feedback.clear()
+    return count
