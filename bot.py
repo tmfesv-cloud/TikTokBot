@@ -166,8 +166,45 @@ def start_webhook() -> None:
             "bot": "Pufik",
         })
 
+    # Диагностика: проверка связи с tikwm/TikTok с IP Render + память процесса.
+    # Открыть в браузере https://tiktokbot-dxpr.onrender.com/diag
+    async def diag(request):
+        import aiohttp
+
+        async def _probe(name: str, url: str) -> dict:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        url, timeout=aiohttp.ClientTimeout(total=15),
+                        allow_redirects=True,
+                    ) as r:
+                        body = await r.read()
+                        return {"name": name, "ok": True, "status": r.status,
+                                "bytes": len(body)}
+            except Exception as e:
+                return {"name": name, "ok": False, "error": str(e)[:150]}
+
+        # RSS в МБ (Linux /proc или fallback)
+        rss_mb = 0.0
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss_mb = int(line.split()[1]) / 1024.0
+                        break
+        except Exception:
+            pass
+
+        tikwm = await _probe("tikwm.com", "https://www.tikwm.com/api/")
+        tiktok = await _probe("tiktok.com", "https://www.tiktok.com/")
+        return web.json_response({
+            "rss_mb": round(rss_mb, 1),
+            "checks": [tikwm, tiktok],
+        })
+
     app.router.add_get("/", health)
     app.router.add_get("/ping", ping)
+    app.router.add_get("/diag", diag)
 
     # Настраиваем вебхук
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
