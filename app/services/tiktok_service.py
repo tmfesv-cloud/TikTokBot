@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import re
+import shutil
 import subprocess
 import textwrap
 import time
@@ -137,6 +138,7 @@ class DownloadResult:
     duration: int | None = None
     audio_file: Path | None = None  # mp3 музыки (для фотопостов, опционально)
     _dir: Path | None = field(default=None, repr=False)
+    _branded: bool = field(default=False, repr=False)  # знак бота уже встроен
 
     def cleanup(self) -> None:
         """Удаляет скачанные файлы и папку запроса."""
@@ -587,6 +589,101 @@ async def _improve_tiktok_audio(
     return result
 
 
+def _probe_height(path: Path) -> int | None:
+    """Высота видео через ffprobe (None, если не смогли узнать)."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=height",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        return int(probe.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+# Пути к шрифтам для водяного знака: Debian (Render) и Windows (локальный запуск).
+_FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+)
+_font_cache: str | None = None  # None — не искали, "" — не найден
+
+
+def _find_font() -> str | None:
+    """Путь к TTF-шрифту для drawtext или None (нет шрифта — знак не ставим).
+
+    Пути с двоеточием (Windows `C:/...`) ломают парсер фильтров ffmpeg, поэтому
+    на Windows шрифт копируется в локальную папку `fonts/` с путём без двоеточия.
+    """
+    global _font_cache
+    if _font_cache is not None:
+        return _font_cache or None
+    candidates = ([Config.BRAND_FONT] if Config.BRAND_FONT else []) + list(_FONT_CANDIDATES)
+    for path in candidates:
+        if not path or not Path(path).exists():
+            continue
+        if ":" in path:
+            local = Path("fonts") / "brand_font.ttf"
+            try:
+                local.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, local)
+                # forward slashes — backslash ломает парсер фильтров ffmpeg
+                _font_cache = str(local).replace("\\", "/")
+                return _font_cache
+            except OSError as e:
+                logger.warning(f"Не удалось скопировать шрифт {path}: {e}")
+                continue
+        _font_cache = path
+        return path
+    _font_cache = ""
+    logger.warning("Шрифт для водяного знака не найден — знак на видео не ставим")
+    return None
+
+
+def _escape_drawtext(value: str) -> str:
+    """Экранирует спецсимволы фильтра drawtext (вне shell — просто строка фильтра)."""
+    return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def _build_drawtext(height: int | None) -> str:
+    """Строка фильтра drawtext (водяной знак @бота в левом нижнем углу).
+
+    Размер шрифта зависит от разрешения (height / BRAND_SIZE_DIV), чтобы знак
+    выглядел одинаково на маленьких и больших видео. Позиция: левый нижний угол.
+    Параметры (прозрачность, размер, фон) кonfigurable через Config.BRAND_*.
+    Возвращает "" — шрифт не найден.
+    """
+    font = _find_font()
+    if not font:
+        return ""
+    fontsize = max(10, round((height or 720) / Config.BRAND_SIZE_DIV))
+    text = _escape_drawtext(Config.BRAND_TEXT)
+    alpha = max(0.0, min(1.0, Config.BRAND_ALPHA))  # [0.0, 1.0]
+
+    dt = (
+        f"drawtext=fontfile={font}:"
+        f"text='{text}':"
+        f"fontsize={fontsize}:"
+        f"fontcolor=white@{alpha}:"
+        f"x=16:y=h-th-16"  # левый нижний угол с отступом 16px
+    )
+
+    # Опционально добавляем чёрный бокс-фон за текстом
+    if Config.BRAND_BOX:
+        box_alpha = max(0.0, min(1.0, Config.BRAND_BOX_ALPHA))
+        dt += f":box=1:boxcolor=black@{box_alpha}:boxborderw=10"
+
+    return dt
+
+
 def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | None:
     """Сжимает видео через ffmpeg до target_bytes.
 
@@ -598,23 +695,14 @@ def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | 
 
     # Определяем разрешение: если выше 720p — масштабируем, это резко
     # сокращает работу и размер (обычно достаточно одного прохода).
+    # Водяной знак бота добавляем в тот же фильтр — без второго перекодирования.
+    height = _probe_height(src)
+    dt = _build_drawtext(height)
     vf = []
-    try:
-        probe = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=height",
-                "-of", "csv=p=0",
-                str(src),
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-        height = int(probe.stdout.strip().splitlines()[0])
-        if height > 720:
-            vf = ["-vf", "scale=-2:720"]
-    except Exception:
-        pass  # не смогли узнать высоту — сжимаем как есть
+    if height and height > 720:
+        vf = ["-vf", f"scale=-2:720,{dt}" if dt else "scale=-2:720"]
+    elif dt:
+        vf = ["-vf", dt]
 
     for crf in (28, 32, 36):
         cmd = [
@@ -668,6 +756,7 @@ async def _ensure_size(result: DownloadResult) -> DownloadResult:
     if compressed:
         logger.info("Большое видео сжато и будет отправлено")
         result.files = [compressed]
+        result._branded = True  # знак бота встроен прямо при сжатии (drawtext в фильтре)
         return result
 
     # Не влезло в лимит даже после сжатия — отдаём понятную ошибку,
@@ -676,6 +765,68 @@ async def _ensure_size(result: DownloadResult) -> DownloadResult:
         "📦 Видео слишком большое — не удалось сжать до лимита Telegram. "
         "Попробуй другое видео."
     )
+
+
+def _watermark_video_sync(src: Path, out_dir: Path) -> Path | None:
+    """Накладывает водяной знак на видео (без сжатия, качество сохраняется).
+
+    Перекодирует через ffmpeg с drawtext (crf 23, аудио копируется без потерь;
+    если кодек аудио несовместим — перекодируем в AAC). Возвращает путь к
+    файлу со знаком или None при любой ошибке (вызывающий вернёт оригинал).
+    """
+    dt = _build_drawtext(_probe_height(src))
+    if not dt:
+        return None
+    out = out_dir / "branded.mp4"
+    # Сначала копируем аудио как есть; если ffmpeg не примет кодек — перекодируем.
+    for audio_args in (["-c:a", "copy"], ["-c:a", "aac", "-b:a", "128k"]):
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(src),
+            "-vf", dt,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-movflags", "+faststart",
+        ] + audio_args + [str(out)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=600)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            logger.warning("Водяной знак: ffmpeg недоступен или таймаут — пропускаем")
+            return None
+        if proc.returncode == 0 and out.exists() and out.stat().st_size > 0:
+            logger.info("Водяной знак наложен")
+            return out
+        logger.warning(f"Водяной знак: ffmpeg не сработал ({proc.stderr[:150]})")
+    return None
+
+
+async def _brand_video(result: DownloadResult) -> DownloadResult:
+    """Накладывает водяной знак бота на скачанное видео.
+
+    Пропускает фотопосты, длинные видео (дольше Config.BRAND_MAX_SEC) и видео,
+    которые уже получили знак при сжатии (_ensure_size → _branded=True).
+    При любой ошибке возвращает исходный результат — брендирование не должно
+    ломать скачивание.
+    """
+    if not result.is_video or not result.files or not result._dir:
+        return result
+    if result._branded:
+        return result
+    if (result.duration or 0) > Config.BRAND_MAX_SEC:
+        return result
+    watermarked = await asyncio.to_thread(
+        _watermark_video_sync, result.files[0], result._dir
+    )
+    if watermarked:
+        result.files = [watermarked]
+    return result
+
+
+async def _finish(result: DownloadResult) -> DownloadResult:
+    """Финальная обработка: сжатие до лимита (со знаком) + водяной знак."""
+    result = await _ensure_size(result)
+    return await _brand_video(result)
 
 
 def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> DownloadResult:
@@ -1027,7 +1178,7 @@ async def download(
         if is_pinterest:
             try:
                 result = await _download_pinterest(normalized, out_dir, max_bytes)
-                return await _ensure_size(result)
+                return await _finish(result)
             except TiktokError:
                 raise
 
@@ -1035,7 +1186,7 @@ async def download(
         # не тратя время на заведомо провальный запрос к yt-dlp.
         if is_tiktok and is_tiktok_photo:
             result = await _download_via_tikwm(normalized, out_dir, max_bytes, hd)
-            return await _ensure_size(result)
+            return await _finish(result)
 
         # Остальное — через yt-dlp
         try:
@@ -1045,7 +1196,7 @@ async def download(
             # TikTok: улучшаем звук (если включено в настройках)
             if is_tiktok and result.is_video:
                 result = await _improve_tiktok_audio(result, normalized, user_id)
-            return await _ensure_size(result)
+            return await _finish(result)
         except (VideoTooLargeError, UnsupportedUrlError):
             # Эти ошибки уже точные — fallback не нужен
             raise
@@ -1059,7 +1210,7 @@ async def download(
                     )
                     if result.is_video:
                         result = await _improve_tiktok_audio(result, normalized, user_id)
-                    return await _ensure_size(result)
+                    return await _finish(result)
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
                 except TiktokError:
