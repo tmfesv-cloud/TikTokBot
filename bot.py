@@ -260,6 +260,29 @@ def start_webhook() -> None:
         except Exception as e:
             steps.append({"step": "outer_error", "error": str(e)[:200]})
 
+        # Полный цикл download() (как бот: сжатие + водяной знак через ffmpeg)
+        try:
+            from app.services import tiktok_service as ts
+            steps.append({"step": "full_download_start", "rss_mb": round(_rss_mb(), 1)})
+            result = await ts.download(url)
+            rss_after = _rss_mb()
+            import os
+            sizes = [round(os.path.getsize(f) / 1024, 1) for f in result.files]
+            steps.append({
+                "step": "full_download_done",
+                "rss_mb": round(rss_after, 1),
+                "delta_mb": round(rss_after - rss0, 1),
+                "files_kb": sizes,
+                "is_video": result.is_video,
+                "duration": result.duration,
+            })
+            result.cleanup()
+            steps.append({"step": "after_cleanup", "rss_mb": round(_rss_mb(), 1)})
+        except Exception as e:
+            steps.append({"step": "full_download_error",
+                          "error": type(e).__name__ + ": " + str(e)[:200],
+                          "rss_mb": round(_rss_mb(), 1)})
+
         tikwm = await _probe("tikwm.com", "https://www.tikwm.com/api/")
         tiktok = await _probe("tiktok.com", "https://www.tiktok.com/")
         return web.json_response({

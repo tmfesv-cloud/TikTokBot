@@ -672,6 +672,8 @@ def _build_drawtext(height: int | None) -> str:
     font = _find_font()
     if not font:
         return ""
+    if not Config.BRAND_TEXT:
+        return ""
     fontsize = max(10, round((height or 720) / Config.BRAND_SIZE_DIV))
     text = _escape_drawtext(Config.BRAND_TEXT)
     alpha = max(0.0, min(1.0, Config.BRAND_ALPHA))  # [0.0, 1.0]
