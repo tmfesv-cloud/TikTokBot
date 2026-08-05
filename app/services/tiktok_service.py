@@ -97,6 +97,14 @@ _SEMAPHORE = asyncio.Semaphore(3)
 # Файлы больше этого — сразу ошибка «слишком большой» (гигабайты не качаем).
 _COMPRESS_MAX_MB = 200
 
+# Жёсткие таймауты на скачивание (сек).
+# С серверных IP (Render) TikTok блокирует запросы: не рвёт соединение,
+# а молчит, и yt-dlp может виснуть навсегда, несмотря на socket_timeout.
+# Таймаут не даёт зависшему скачиванию повесить вебхук (иначе Telegram
+# получает 502, а Render перезапускает бота).
+_YDL_TIMEOUT_SEC = 120       # максимум на один вызов yt-dlp
+_TIKWM_TIMEOUT_SEC = 150     # максимум на tikwm (включая повторные попытки)
+
 # Заголовки для HTTP-запросов к TikTok CDN и tikwm (без UA они отдают 403)
 _HTTP_HEADERS = {
     "User-Agent": (
@@ -1130,6 +1138,27 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise TiktokError("tikwm: плохой ответ") from e
 
 
+async def _download_sync_timed(
+    url: str, out_dir: Path, max_bytes: int, hd: bool = True
+) -> DownloadResult:
+    """yt-dlp с жёстким таймаутом (иначе зависнет навсегда на Render).
+
+    yt-dlp вызывается в потоке, который нельзя прервать из asyncio, поэтому
+    при таймауте поток остаётся висеть в фоне, но основной код уже бросает
+    ошибку и может переключиться на tikwm.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_download_sync, url, out_dir, max_bytes, hd),
+            timeout=_YDL_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"yt-dlp завис (> {_YDL_TIMEOUT_SEC}с): {url}")
+        raise DownloadTimeoutError(
+            "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+        )
+
+
 async def download(
     url: str,
     user_id: int | None = None,
@@ -1182,37 +1211,41 @@ async def download(
             except TiktokError:
                 raise
 
-        # TikTok-фотопост: yt-dlp его не умеет — сразу идём в tikwm,
-        # не тратя время на заведомо провальный запрос к yt-dlp.
-        if is_tiktok and is_tiktok_photo:
-            result = await _download_via_tikwm(normalized, out_dir, max_bytes, hd)
-            return await _finish(result)
-
-        # Остальное — через yt-dlp
-        try:
-            result = await asyncio.to_thread(
-                _download_sync, normalized, out_dir, max_bytes, hd
-            )
-            # TikTok: улучшаем звук (если включено в настройках)
-            if is_tiktok and result.is_video:
-                result = await _improve_tiktok_audio(result, normalized, user_id)
-            return await _finish(result)
-        except (VideoTooLargeError, UnsupportedUrlError):
-            # Эти ошибки уже точные — fallback не нужен
-            raise
-        except TiktokError as primary:
-            # yt-dlp не справился — пробуем tikwm (только для TikTok)
-            if is_tiktok:
-                logger.info(f"yt-dlp не смог, пробуем tikwm: {normalized}")
+        # TikTok — сразу tikwm: он работает даже с серверных IP (Render),
+        # где yt-dlp зависает навсегда из-за блокировки TikTok. yt-dlp
+        # пробуем только если tikwm сам недоступен.
+        if is_tiktok:
+            try:
+                result = await asyncio.wait_for(
+                    _download_via_tikwm(normalized, out_dir, max_bytes, hd),
+                    timeout=_TIKWM_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"tikwm завис (> {_TIKWM_TIMEOUT_SEC}с): {normalized}")
+                raise DownloadTimeoutError(
+                    "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+                )
+            except (VideoTooLargeError, VideoUnavailableError):
+                # Эти ошибки уже точные — fallback не нужен
+                raise
+            except TiktokError as primary:
+                # tikwm недоступен — пробуем yt-dlp (с жёстким таймаутом)
+                logger.info(f"tikwm не смог, пробуем yt-dlp: {normalized}")
                 try:
-                    result = await _download_via_tikwm(
+                    result = await _download_sync_timed(
                         normalized, out_dir, max_bytes, hd
                     )
-                    if result.is_video:
-                        result = await _improve_tiktok_audio(result, normalized, user_id)
-                    return await _finish(result)
-                except (VideoTooLargeError, VideoUnavailableError):
+                except (VideoTooLargeError, UnsupportedUrlError):
                     raise
                 except TiktokError:
                     raise primary from None
-            raise
+            # TikTok: улучшаем звук (если включено в настройках)
+            if result.is_video:
+                result = await _improve_tiktok_audio(result, normalized, user_id)
+            return await _finish(result)
+
+        # Остальные платформы — через yt-dlp (с жёстким таймаутом)
+        result = await _download_sync_timed(
+            normalized, out_dir, max_bytes, hd
+        )
+        return await _finish(result)
