@@ -1211,9 +1211,10 @@ async def download(
             except TiktokError:
                 raise
 
-        # TikTok — сразу tikwm: он работает даже с серверных IP (Render),
-        # где yt-dlp зависает навсегда из-за блокировки TikTok. yt-dlp
-        # пробуем только если tikwm сам недоступен.
+        # TikTok — ТОЛЬКО tikwm. С серверных IP (Render) yt-dlp блокируется
+        # TikTok не ошибкой, а вечным зависанием + утечкой памяти (OOM 512MB).
+        # Поэтому для TikTok yt-dlp НЕ вызываем вообще: если tikwm не справился,
+        # даём понятную ошибку, а не рискуем уронить весь инстанс.
         if is_tiktok:
             try:
                 result = await asyncio.wait_for(
@@ -1226,19 +1227,16 @@ async def download(
                     "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
                 )
             except (VideoTooLargeError, VideoUnavailableError):
-                # Эти ошибки уже точные — fallback не нужен
+                # Эти ошибки уже точные — переводим как есть
                 raise
-            except TiktokError as primary:
-                # tikwm недоступен — пробуем yt-dlp (с жёстким таймаутом)
-                logger.info(f"tikwm не смог, пробуем yt-dlp: {normalized}")
-                try:
-                    result = await _download_sync_timed(
-                        normalized, out_dir, max_bytes, hd
-                    )
-                except (VideoTooLargeError, UnsupportedUrlError):
-                    raise
-                except TiktokError:
-                    raise primary from None
+            except TiktokError:
+                # tikwm недоступен. yt-dlp для TikTok на Render не пробуем —
+                # он зависает и роняет инстанс от нехватки памяти.
+                logger.warning(f"tikwm не смог (yt-dlp не используем): {normalized}")
+                raise TiktokError(
+                    "😔 Сервис скачивания TikTok временно недоступен. "
+                    "Попробуй ещё раз через минуту."
+                )
             # TikTok: улучшаем звук (если включено в настройках)
             if result.is_video:
                 result = await _improve_tiktok_audio(result, normalized, user_id)
