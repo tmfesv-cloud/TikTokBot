@@ -171,6 +171,17 @@ def start_webhook() -> None:
     async def diag(request):
         import aiohttp
 
+        def _rss_mb() -> float:
+            """RSS текущего процесса в МБ (Linux /proc)."""
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            return int(line.split()[1]) / 1024.0
+            except Exception:
+                pass
+            return 0.0
+
         async def _probe(name: str, url: str) -> dict:
             try:
                 async with aiohttp.ClientSession() as s:
@@ -184,22 +195,77 @@ def start_webhook() -> None:
             except Exception as e:
                 return {"name": name, "ok": False, "error": str(e)[:150]}
 
-        # RSS в МБ (Linux /proc или fallback)
-        rss_mb = 0.0
+        # Реальный цикл tikwm-скачивания (как бот) с замером памяти на каждом шаге.
+        # URL из query ?url=... или тестовый.
+        url = request.query.get("url", "https://www.tiktok.com/t/ZP8n6mLjT/")
+        steps: list[dict] = []
+        rss0 = _rss_mb()
+
+        async def _tikwm_steps():
+            from app.services import tiktok_service as ts
+            import yt_dlp
+            steps.append({"step": "start", "rss_mb": round(rss0, 1),
+                          "ytdlp": yt_dlp.version.__version__})
+            try:
+                # ffmpeg есть?
+                import subprocess, shutil
+                ff = shutil.which("ffmpeg")
+                steps.append({"step": "ffmpeg", "path": ff or "NOT FOUND",
+                              "rss_mb": round(_rss_mb(), 1)})
+            except Exception as e:
+                steps.append({"step": "ffmpeg", "error": str(e)[:100]})
+
+            try:
+                # tikwm API запрос
+                async with aiohttp.ClientSession(headers=ts._HTTP_HEADERS) as s:
+                    async with s.get(
+                        "https://www.tikwm.com/api/",
+                        params={"url": url, "hd": 1},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as r:
+                        payload = await r.json(content_type=None)
+                    data = payload.get("data") or {}
+                    video_url = data.get("hdplay") or data.get("play")
+                    steps.append({
+                        "step": "tikwm_api",
+                        "code": payload.get("code"),
+                        "title": (data.get("title") or "")[:60],
+                        "hd_size": data.get("hd_size"),
+                        "duration": data.get("duration"),
+                        "rss_mb": round(_rss_mb(), 1),
+                    })
+                    if video_url:
+                        # Скачивание файла чанками (как в боте)
+                        async with s.get(
+                            video_url, timeout=aiohttp.ClientTimeout(total=120),
+                        ) as fr:
+                            size = 0
+                            with open("downloads/diag_test.mp4", "wb") as f:
+                                async for chunk in fr.content.iter_chunked(65536):
+                                    size += len(chunk)
+                                    f.write(chunk)
+                        steps.append({
+                            "step": "download_file",
+                            "http": fr.status,
+                            "bytes": size,
+                            "rss_mb": round(_rss_mb(), 1),
+                        })
+            except Exception as e:
+                steps.append({"step": "tikwm_download_error",
+                              "error": str(e)[:200],
+                              "rss_mb": round(_rss_mb(), 1)})
+
         try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        rss_mb = int(line.split()[1]) / 1024.0
-                        break
-        except Exception:
-            pass
+            await _tikwm_steps()
+        except Exception as e:
+            steps.append({"step": "outer_error", "error": str(e)[:200]})
 
         tikwm = await _probe("tikwm.com", "https://www.tikwm.com/api/")
         tiktok = await _probe("tiktok.com", "https://www.tiktok.com/")
         return web.json_response({
-            "rss_mb": round(rss_mb, 1),
+            "rss_mb": round(rss0, 1),
             "checks": [tikwm, tiktok],
+            "tikwm_download": steps,
         })
 
     app.router.add_get("/", health)
