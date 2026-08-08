@@ -2,8 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# ffmpeg нужен для слияния аудио/видео в редких случаях (если TikTok отдаёт их раздельно)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# ffmpeg + шрифт для водяного знака (drawtext)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

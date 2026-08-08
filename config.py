@@ -47,15 +47,19 @@ class Config:
     # BRAND_ALPHA — непрозрачность текста (0.0-1.0; 0.2 = 80% прозрачность);
     # BRAND_SIZE_DIV — высота_видео / делитель = размер шрифта (96 ≈ мелкий);
     # BRAND_BOX — чёрный фон за текстом (1 = вкл); BRAND_BOX_ALPHA — прозрачность фона.
-    # Временный откат водяного знака: ffmpeg drawtext на Render ест 548MB+
-    # (лимит контейнера 512MB) → OOM. Знак отключён, пока не сделаем его лёгким.
-    BRAND_TEXT: str = os.getenv("BRAND_TEXT", "")
+    #
+    # Лёгкость: пресет ultrafast + 1 поток — пик памяти ~140-200MB вместо 548MB
+    # (оченьfast жрал 548MB и ронял Render с OOM 512MB). Оба параметра настраиваются.
+    BRAND_TEXT: str = os.getenv("BRAND_TEXT", "@PufikSaverBot")
     BRAND_MAX_SEC: int = int(os.getenv("BRAND_MAX_SEC", "300"))
     BRAND_FONT: str = os.getenv("BRAND_FONT", "")
     BRAND_ALPHA: float = float(os.getenv("BRAND_ALPHA", "0.2"))
     BRAND_SIZE_DIV: int = int(os.getenv("BRAND_SIZE_DIV", "96"))
     BRAND_BOX: bool = os.getenv("BRAND_BOX", "0") == "1"
     BRAND_BOX_ALPHA: float = float(os.getenv("BRAND_BOX_ALPHA", "0.45"))
+    # Пресет и потоки ffmpeg для водяного знака и сжатия (память! см. выше)
+    BRAND_PRESET: str = os.getenv("BRAND_PRESET", "ultrafast")
+    BRAND_THREADS: int = int(os.getenv("BRAND_THREADS", "1"))
 
     @classmethod
     def validate(cls) -> list[str]:

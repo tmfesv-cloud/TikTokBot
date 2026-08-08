@@ -17,7 +17,7 @@ from pathlib import Path
 import aiohttp
 import yt_dlp
 
-from app.services import user_settings
+from app.services import stats, user_settings
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -694,12 +694,14 @@ def _build_drawtext(height: int | None) -> str:
     return dt
 
 
-def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | None:
+def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int,
+                         brand: bool = True) -> Path | None:
     """Сжимает видео через ffmpeg до target_bytes.
 
     Понижает разрешение до 720p (если выше), затем пробует -crf 28 → 32 → 36,
     пока размер не влезет в лимит. Возвращает путь к сжатому файлу или None,
     если не влезло даже на crf=36 (вызывающий покажет ошибку).
+    brand — добавлять ли водяной знак в фильтр (False у пользователей с рефералом).
     """
     out = out_dir / "compressed.mp4"
 
@@ -707,7 +709,7 @@ def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | 
     # сокращает работу и размер (обычно достаточно одного прохода).
     # Водяной знак бота добавляем в тот же фильтр — без второго перекодирования.
     height = _probe_height(src)
-    dt = _build_drawtext(height)
+    dt = _build_drawtext(height) if brand else ""
     vf = []
     if height and height > 720:
         vf = ["-vf", f"scale=-2:720,{dt}" if dt else "scale=-2:720"]
@@ -719,7 +721,8 @@ def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | 
             "ffmpeg", "-y",
             "-i", str(src),
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", Config.BRAND_PRESET,
+            "-threads", str(Config.BRAND_THREADS),
             "-crf", str(crf),
         ]
         if vf:
@@ -748,11 +751,12 @@ def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | 
     return None
 
 
-async def _ensure_size(result: DownloadResult) -> DownloadResult:
+async def _ensure_size(result: DownloadResult, brand: bool = True) -> DownloadResult:
     """Сжимает видео, если оно больше лимита Telegram (45 МБ).
 
     Скачивание идёт с потолком _COMPRESS_MAX_MB (200 МБ), поэтому сюда
     попадают файлы 45–200 МБ. Меньше лимита — отдаём как есть, без сжатия.
+    brand — ставить ли знак бота при сжатии (False у пользователей с рефералом).
     """
     if not result.is_video or not result.files or not result._dir:
         return result
@@ -761,12 +765,12 @@ async def _ensure_size(result: DownloadResult) -> DownloadResult:
         return result
 
     compressed = await asyncio.to_thread(
-        _compress_video_sync, result.files[0], result._dir, limit
+        _compress_video_sync, result.files[0], result._dir, limit, brand
     )
     if compressed:
         logger.info("Большое видео сжато и будет отправлено")
         result.files = [compressed]
-        result._branded = True  # знак бота встроен прямо при сжатии (drawtext в фильтре)
+        result._branded = brand  # знак встроен при сжатии, только если brand=True
         return result
 
     # Не влезло в лимит даже после сжатия — отдаём понятную ошибку,
@@ -783,6 +787,9 @@ def _watermark_video_sync(src: Path, out_dir: Path) -> Path | None:
     Перекодирует через ffmpeg с drawtext (crf 23, аудио копируется без потерь;
     если кодек аудио несовместим — перекодируем в AAC). Возвращает путь к
     файлу со знаком или None при любой ошибке (вызывающий вернёт оригинал).
+
+    Лёгкость: пресет ultrafast + 1 поток (Config.BRAND_PRESET/BRAND_THREADS) —
+    пик памяти ~140-200MB вместо 548MB на veryfast (иначе OOM на Render).
     """
     dt = _build_drawtext(_probe_height(src))
     if not dt:
@@ -795,7 +802,8 @@ def _watermark_video_sync(src: Path, out_dir: Path) -> Path | None:
             "-i", str(src),
             "-vf", dt,
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", Config.BRAND_PRESET,
+            "-threads", str(Config.BRAND_THREADS),
             "-crf", "23",
             "-movflags", "+faststart",
         ] + audio_args + [str(out)]
@@ -811,14 +819,33 @@ def _watermark_video_sync(src: Path, out_dir: Path) -> Path | None:
     return None
 
 
-async def _brand_video(result: DownloadResult) -> DownloadResult:
+def _should_brand(user_id: int | None) -> bool:
+    """Накладывать ли водяной знак на видео этого пользователя.
+
+    Знак убирается, если пользователь пригласил хотя бы одного друга по
+    реферальной ссылке (счётчик в Redis персистентен → знак исчезает навсегда).
+    При ошибке Redis брендируем — знак лучше, чем пропущенный.
+    """
+    if user_id is None:
+        return True  # без user_id знак ставим (например, групповые запросы)
+    try:
+        return stats.get_invites_count(user_id) < 1
+    except Exception as e:
+        logger.warning(f"Не смогли проверить рефералы ({user_id}): {e}")
+        return True
+
+
+async def _brand_video(result: DownloadResult, brand: bool) -> DownloadResult:
     """Накладывает водяной знак бота на скачанное видео.
 
-    Пропускает фотопосты, длинные видео (дольше Config.BRAND_MAX_SEC) и видео,
-    которые уже получили знак при сжатии (_ensure_size → _branded=True).
+    Пропускает фотопосты, длинные видео (дольше Config.BRAND_MAX_SEC), видео,
+    которые уже получили знак при сжатии (_ensure_size → _branded=True), и
+    скачивания пользователей с ≥1 рефералом (brand=False).
     При любой ошибке возвращает исходный результат — брендирование не должно
     ломать скачивание.
     """
+    if not brand:
+        return result
     if not result.is_video or not result.files or not result._dir:
         return result
     if result._branded:
@@ -833,10 +860,10 @@ async def _brand_video(result: DownloadResult) -> DownloadResult:
     return result
 
 
-async def _finish(result: DownloadResult) -> DownloadResult:
+async def _finish(result: DownloadResult, brand: bool = True) -> DownloadResult:
     """Финальная обработка: сжатие до лимита (со знаком) + водяной знак."""
-    result = await _ensure_size(result)
-    return await _brand_video(result)
+    result = await _ensure_size(result, brand)
+    return await _brand_video(result, brand)
 
 
 def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> DownloadResult:
@@ -1203,13 +1230,15 @@ async def download(
     # Файлы больше 200 МБ отсекаются ещё на этапе скачивания.
     max_bytes = _COMPRESS_MAX_MB * 1024 * 1024
     out_dir = Path(Config.DOWNLOADS_DIR)
+    # Водяной знак: ставим, только если юзер не пригласил ни одного друга.
+    brand = _should_brand(user_id)
     logger.info(f"Скачивание (hd={hd}): {normalized}")
     async with _SEMAPHORE:
         # Pinterest — сразу кастомный путь (yt-dlp не извлекает картинки)
         if is_pinterest:
             try:
                 result = await _download_pinterest(normalized, out_dir, max_bytes)
-                return await _finish(result)
+                return await _finish(result, brand)
             except TiktokError:
                 raise
 
@@ -1242,10 +1271,10 @@ async def download(
             # TikTok: улучшаем звук (если включено в настройках)
             if result.is_video:
                 result = await _improve_tiktok_audio(result, normalized, user_id)
-            return await _finish(result)
+            return await _finish(result, brand)
 
         # Остальные платформы — через yt-dlp (с жёстким таймаутом)
         result = await _download_sync_timed(
             normalized, out_dir, max_bytes, hd
         )
-        return await _finish(result)
+        return await _finish(result, brand)
