@@ -102,7 +102,7 @@ _COMPRESS_MAX_MB = 200
 # Таймаут не даёт зависшему скачиванию повесить вебхук (иначе Telegram
 # получает 502, а Render перезапускает бота).
 _YDL_TIMEOUT_SEC = 120       # максимум на один вызов yt-dlp
-_TIKWM_TIMEOUT_SEC = 150     # максимум на tikwm (включая повторные попытки)
+_TIKWM_TIMEOUT_SEC = 60      # максимум на tikwm (включая повторные попытки)
 
 # Заголовки для HTTP-запросов к TikTok CDN и tikwm (без UA они отдают 403)
 _HTTP_HEADERS = {
@@ -897,8 +897,13 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         async with session.get(
             "https://www.tikwm.com/api/",
             params={"url": url, "hd": 1 if hd else 0},
-            timeout=aiohttp.ClientTimeout(total=30),
+            timeout=aiohttp.ClientTimeout(total=20, connect=10),
         ) as resp:
+            if resp.status != 200:
+                logger.warning(f"tikwm: HTTP {resp.status} для {url}")
+                raise VideoUnavailableError(
+                    "😔 Сервис скачивания временно недоступен."
+                )
             payload = await resp.json(content_type=None)
 
         if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
@@ -978,10 +983,10 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
                     raise
                 except VideoUnavailableError as e:
                     last_error = e
-                    # tikwm ответил, что видео удалено/битая ссылка — повторять
-                    # бессмысленно. Ошибки "Не удалось скачать фотопост/файлы
-                    # с CDN" — истёкшие подписанные ссылки, стоит перезапросить.
-                    if "удалено" in str(e):
+                    # tikwm ответил ошибкой — повторять бессмысленно, если
+                    # сервис недоступен (403/5xx) или видео удалено/битое.
+                    err_text = str(e)
+                    if "удалено" in err_text or "недоступен" in err_text:
                         break
                     if attempt == 4:
                         break
