@@ -939,9 +939,10 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
             payload = await resp.json(content_type=None)
 
         if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
+            msg = payload.get("msg") or "Неизвестная ошибка tikwm"
+            logger.warning(f"tikwm ошибка (code={payload.get('code')}): {msg}")
             raise VideoUnavailableError(
-                "😔 Не удалось скачать это видео. Возможно, оно удалено "
-                "или ссылка битая."
+                f"😔 Не удалось скачать: {msg}"
             )
 
         data = payload.get("data") or {}
