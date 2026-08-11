@@ -114,6 +114,23 @@ _HTTP_HEADERS = {
 }
 
 
+def _tikwm_api_url() -> str:
+    """URL для запросов к tikwm: через Cloudflare Worker (если настроен) или напрямую."""
+    return Config.TIKWM_PROXY_URL or "https://www.tikwm.com/api/"
+
+
+def _tikwm_api_params(url: str, hd: bool = True) -> dict | list[tuple]:
+    """Параметры запроса: для Worker — JSON body (POST), для прямого — query params (GET)."""
+    if Config.TIKWM_PROXY_URL:
+        return {"url": url, "hd": 1 if hd else 0}
+    return {"url": url, "hd": 1 if hd else 0}
+
+
+def _tikwm_method() -> str:
+    """HTTP метод: для Worker — POST (JSON body), для прямого — GET (query params)."""
+    return "POST" if Config.TIKWM_PROXY_URL else "GET"
+
+
 class TiktokError(Exception):
     """Базовая ошибка скачивания TikTok."""
 
@@ -366,11 +383,16 @@ async def probe(url: str) -> ProbeResult:
     if detect_platform(url) == "tiktok":
         try:
             async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
-                async with session.get(
-                    "https://www.tikwm.com/api/",
-                    params={"url": url, "hd": 1},
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
+                api_url = _tikwm_api_url()
+                params = {"url": url, "hd": 1}
+                method = _tikwm_method()
+                kwargs = {"timeout": aiohttp.ClientTimeout(total=15)}
+                if method == "POST":
+                    kwargs["json"] = params
+                else:
+                    kwargs["params"] = params
+
+                async with session.request(method, api_url, **kwargs) as resp:
                     payload = await resp.json(content_type=None)
             if isinstance(payload, dict) and payload.get("code") in (0, 200):
                 data = payload.get("data") or {}
@@ -550,11 +572,16 @@ async def _improve_tiktok_audio(
     try:
         # 1. Узнаём URL оригинального трека через tikwm и качаем его
         async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
-            async with session.get(
-                "https://www.tikwm.com/api/",
-                params={"url": url, "hd": 1},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
+            api_url = _tikwm_api_url()
+            params = {"url": url, "hd": 1}
+            method = _tikwm_method()
+            kwargs = {"timeout": aiohttp.ClientTimeout(total=30)}
+            if method == "POST":
+                kwargs["json"] = params
+            else:
+                kwargs["params"] = params
+
+            async with session.request(method, api_url, **kwargs) as resp:
                 payload = await resp.json(content_type=None)
             data = payload.get("data") or {}
             music_url = data.get("music")
@@ -894,11 +921,16 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         не скачались. Подписанные ссылки tikwm истекают (CDN отдаёт 403),
         поэтому при неудаче вызывающий перезапрашивает свежие ссылки.
         """
-        async with session.get(
-            "https://www.tikwm.com/api/",
-            params={"url": url, "hd": 1 if hd else 0},
-            timeout=aiohttp.ClientTimeout(total=20, connect=10),
-        ) as resp:
+        api_url = _tikwm_api_url()
+        params = {"url": url, "hd": 1 if hd else 0}
+        method = _tikwm_method()
+        kwargs = {"timeout": aiohttp.ClientTimeout(total=20, connect=10)}
+        if method == "POST":
+            kwargs["json"] = params
+        else:
+            kwargs["params"] = params
+
+        async with session.request(method, api_url, **kwargs) as resp:
             if resp.status != 200:
                 logger.warning(f"tikwm: HTTP {resp.status} для {url}")
                 raise VideoUnavailableError(
