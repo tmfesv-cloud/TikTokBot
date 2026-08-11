@@ -1015,10 +1015,11 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
                     raise
                 except VideoUnavailableError as e:
                     last_error = e
+                    err_text = str(e)
+                    logger.warning(f"tikwm попытка {attempt+1}/5: {err_text[:100]}")
                     # tikwm ответил ошибкой — повторять бессмысленно, если
                     # сервис недоступен (403/5xx) или видео удалено/битое.
-                    err_text = str(e)
-                    if "удалено" in err_text or "недоступен" in err_text:
+                    if "удалено" in err_text or "недоступен" in err_text or "Limit" in err_text:
                         break
                     if attempt == 4:
                         break
