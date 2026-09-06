@@ -115,20 +115,18 @@ _HTTP_HEADERS = {
 
 
 def _tikwm_api_url() -> str:
-    """URL для запросов к tikwm: через Cloudflare Worker (если настроен) или напрямую."""
-    return Config.TIKWM_PROXY_URL or "https://www.tikwm.com/api/"
+    """URL для запросов к tikwm."""
+    return "https://www.tikwm.com/api/"
 
 
 def _tikwm_api_params(url: str, hd: bool = True) -> dict | list[tuple]:
-    """Параметры запроса: для Worker — JSON body (POST), для прямого — query params (GET)."""
-    if Config.TIKWM_PROXY_URL:
-        return {"url": url, "hd": 1 if hd else 0}
+    """Параметры запроса."""
     return {"url": url, "hd": 1 if hd else 0}
 
 
 def _tikwm_method() -> str:
-    """HTTP метод: для Worker — POST (JSON body), для прямого — GET (query params)."""
-    return "POST" if Config.TIKWM_PROXY_URL else "GET"
+    """HTTP метод."""
+    return "GET"
 
 
 class TiktokError(Exception):

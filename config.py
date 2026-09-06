@@ -41,10 +41,6 @@ class Config:
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
 
-    # Cloudflare Worker — прокси для tikwm (обходит блокировку IP дата-центров).
-    # Если задан — запросы к tikwm идут через Worker, иначе напрямую.
-    TIKWM_PROXY_URL: str = os.getenv("TIKWM_PROXY_URL", "")
-
     # Прокси для yt-dlp (например, на Render для обхода блокировок TikTok).
     # Формат: http://user:pass@host:port или socks5://user:pass@host:port
     PROXY_URL: str = os.getenv("PROXY_URL", "")
