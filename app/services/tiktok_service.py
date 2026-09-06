@@ -1014,11 +1014,6 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise VideoUnavailableError("😔 Не удалось получить ссылки на файлы.")
 
     try:
-        # Настройка прокси для tikwm запросов
-        connector = None
-        if Config.PROXY_URL:
-            from aiohttp_socks import ProxyConnector
-            connector = ProxyConnector.from_url(Config.PROXY_URL)
         async with _create_session() as session:
             # Подписанные CDN-ссылки tikwm быстро истекают (403). Если файлы
             # не скачались — перезапрашиваем свежие ссылки, до 3 циклов.
