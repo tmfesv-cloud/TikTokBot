@@ -9,10 +9,11 @@ import logging
 import subprocess
 from pathlib import Path
 
-from aiogram import Router
-from aiogram.types import FSInputFile, InputMediaPhoto, Message
+from aiogram import F, Router
+from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.services import tiktok_service, user_settings
+from app.services import stats, tiktok_service, user_settings
 
 logger = logging.getLogger(__name__)
 
@@ -25,28 +26,62 @@ _DOWNLOAD_CMDS = ("/тикток", "/tt", "/скачать", "/скачай", "/
 _queues: dict[int, asyncio.Queue] = {}
 _workers: dict[int, asyncio.Task] = {}
 
+# Плейлисты: ждём ответа пользователя "скачать весь?" (user_id -> url)
+_pending_playlists: dict[int, str] = {}
+
+# Максимум роликов в плейлисте
+_PLAYLIST_LIMIT = 25
+
+
+def _playlist_kb() -> InlineKeyboardMarkup:
+    """Кнопки «Скачать весь плейлист?»"""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да", callback_data="pl:yes")
+    kb.button(text="❌ Нет", callback_data="pl:no")
+    return kb.as_markup()
+
 
 def _extract_audio_sync(video_path: Path, out_dir: Path) -> Path | None:
     """Извлекает аудио-дорожку из видео через ffmpeg.
 
-    Возвращает путь к mp3 или None (если ffmpeg недоступен или нечего извлекать).
+    Сначала пробуем скопировать дорожку как есть в .m4a — без потерь
+    (исходный битрейт сохраняется). Если кодек несовместим с .m4a
+    (например Opus у YouTube) — перекодируем в AAC 192k.
+
+    Возвращает путь к файлу или None (если ffmpeg недоступен или нечего извлекать).
     """
-    audio_path = out_dir / "audio.mp3"
+    m4a_path = out_dir / "audio.m4a"
     try:
+        # 1) Копия без перекодирования — качество как в источнике
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
                 "-vn",
-                "-acodec", "libmp3lame",
-                "-q:a", "4",
-                str(audio_path),
+                "-c:a", "copy",
+                str(m4a_path),
             ],
             capture_output=True,
             timeout=120,
         )
-        if result.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 0:
-            return audio_path
+        if result.returncode == 0 and m4a_path.exists() and m4a_path.stat().st_size > 0:
+            return m4a_path
+
+        # 2) Кодек не влез в .m4a — перекодируем в AAC 192k (без потерь не вышло)
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-vn",
+                "-acodec", "aac",
+                "-b:a", "192k",
+                str(m4a_path),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode == 0 and m4a_path.exists() and m4a_path.stat().st_size > 0:
+            return m4a_path
     except FileNotFoundError:
         logger.debug("ffmpeg не найден — извлечение аудио невозможно")
     except subprocess.TimeoutExpired:
@@ -129,8 +164,20 @@ async def _process_queue(user_id: int) -> None:
 
 
 async def _handle_download(message: Message, url: str) -> None:
-    """Общий путь: кулдаун → прямое скачивание или очередь."""
+    """Общий путь: плейлист → вопрос; иначе кулдаун → скачивание/очередь."""
     user_id = message.from_user.id
+
+    # Плейлист — спрашиваем, качать ли весь (не встаём в очередь)
+    probe = await tiktok_service.probe(url)
+    if probe.is_playlist:
+        _pending_playlists[user_id] = url
+        count = probe.playlist_count
+        await message.answer(
+            f"🎬 Это плейлист из {count or '?'} роликов.\n"
+            f"Скачать весь плейлист? (до {_PLAYLIST_LIMIT} роликов)",
+            reply_markup=_playlist_kb(),
+        )
+        return
 
     # Анти-спам — ставим в очередь вместо игнорирования
     left = tiktok_service.cooldown_left(user_id)
@@ -138,28 +185,90 @@ async def _handle_download(message: Message, url: str) -> None:
         await _enqueue(message, url)
         return
 
-    await _handle_download_inner(message, url)
+    await _handle_download_inner(message, url, probe_info=probe)
 
 
-async def _handle_download_inner(message: Message, url: str) -> None:
-    """Скачивание и отправка (без проверки кулдауна)."""
-    user_id = message.from_user.id
+async def _handle_download_inner(
+    message: Message,
+    url: str,
+    user_id: int | None = None,
+    probe_info: tiktok_service.ProbeResult | None = None,
+) -> None:
+    """Скачивание и отправка (без проверки кулдауна).
+
+    user_id — для callback-сообщений (у них message.from_user может быть None).
+    probe_info — результат probe() (избегаем лишнего запроса к платформе).
+    """
+    user_id = user_id or message.from_user.id
     tiktok_service.mark_used(user_id)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
+
+    # Фидбек: "Скачиваю видео..." показываем только для длинных видео
+    # (дольше 2 минут). Короткие и фотопосты скачиваются быстро — статус
+    # не нужен.
+    status_msg = None
+    is_tiktok_photo = None
+    try:
+        info = probe_info or await tiktok_service.probe(url)
+        if info.duration and info.duration > 120:
+            status_msg = await message.answer("⏳ Скачиваю видео...", parse_mode=None)
+        elif info.is_tiktok_photo:
+            is_tiktok_photo = True
+    except Exception:
+        pass  # не смогли узнать длительность — просто не показываем статус
+
+    async def _cleanup_status() -> None:
+        nonlocal status_msg
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
     result = None
     s = user_settings.get(user_id)
     try:
-        result = await tiktok_service.download(url, user_id=user_id)
+        result = await tiktok_service.download(
+            url, user_id=user_id, is_tiktok_photo=is_tiktok_photo
+        )
     except tiktok_service.TiktokError as e:
+        await _cleanup_status()
         await message.answer(str(e), parse_mode=None)
+        # Уведомляем владельца о сбое платформы (не для «пользовательских» ошибок:
+        # слишком большое видео, видео удалено, неверная ссылка)
+        if not isinstance(
+            e,
+            (
+                tiktok_service.VideoTooLargeError,
+                tiktok_service.VideoUnavailableError,
+                tiktok_service.UnsupportedUrlError,
+            ),
+        ):
+            platform = tiktok_service.detect_platform(url)
+            await stats.notify_owner(
+                message.bot,
+                f"⚠️ Скачивание с {platform} падает: {e}",
+                rate_key=f"fail:{platform}",
+            )
         return
     except Exception as e:
         logger.exception(f"Ошибка скачивания для {user_id}")
+        await _cleanup_status()
         await message.answer(
             "😔 Что-то пошло не так. Попробуй ещё раз позже.", parse_mode=None
         )
+        await stats.notify_owner(
+            message.bot,
+            "💥 Неожиданная ошибка при скачивании. Смотри логи.",
+            rate_key="crash",
+        )
         return
+
+    stats.register_download(
+        user_id,
+        tiktok_service.detect_platform(url),
+        stats.make_name(message.from_user.username, message.from_user.first_name),
+    )
 
     try:
         if result.is_video:
@@ -202,10 +311,12 @@ async def _handle_download_inner(message: Message, url: str) -> None:
                     logger.warning(f"Не удалось отправить аудио: {e}")
     except Exception as e:
         logger.exception(f"Ошибка отправки файла для {user_id}")
+        await _cleanup_status()
         await message.answer(
             "😔 Не удалось отправить файл. Попробуй ещё раз.", parse_mode=None
         )
     finally:
+        await _cleanup_status()
         if result:
             result.cleanup()
 
@@ -231,3 +342,54 @@ async def auto_download(message: Message) -> None:
     if not url:
         return
     await _handle_download(message, url)
+
+
+@router.callback_query(F.data.startswith("pl:"))
+async def on_playlist_choice(callback: CallbackQuery) -> None:
+    """Ответ на «Скачать весь плейлист?» — Да/Нет."""
+    user_id = callback.from_user.id
+    url = _pending_playlists.pop(user_id, None)
+    if not url:
+        await callback.answer("Ссылка устарела, отправь плейлист заново 🫡")
+        return
+
+    # Убираем кнопки
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+    if callback.data == "pl:no":
+        # Только первый ролик — обычное скачивание ссылки плейлиста
+        # (yt-dlp с noplaylist возьмёт первый ролик)
+        await _handle_download_inner(
+            callback.message, url, user_id=user_id
+        )
+        return
+
+    # «Да» — качаем весь плейлист по очереди
+    urls = await tiktok_service.get_playlist_urls(url, limit=_PLAYLIST_LIMIT)
+    if not urls:
+        await callback.message.answer(
+            "😔 Не удалось получить ролики плейлиста. Попробуй позже.",
+            parse_mode=None,
+        )
+        return
+
+    n = len(urls)
+    await callback.message.answer(
+        f"📚 Скачиваю плейлист: {n} роликов. Это займёт время...",
+        parse_mode=None,
+    )
+    for i, u in enumerate(urls, 1):
+        try:
+            await _handle_download_inner(
+                callback.message, u, user_id=user_id
+            )
+        except Exception as e:
+            logger.error(f"Ошибка ролика {i}/{n} в плейлисте: {e}")
+        # Небольшая пауза между роликами, чтобы не флудить платформу
+        if i < n:
+            await asyncio.sleep(2)
+    await callback.message.answer("✅ Плейлист скачан!", parse_mode=None)

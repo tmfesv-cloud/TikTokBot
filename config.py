@@ -10,6 +10,13 @@ class Config:
     # Telegram
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 
+    # ID владельца бота (для доступа к /stats). Узнай свой ID у @userinfobot
+    OWNER_ID: int = int((os.getenv("OWNER_ID") or "0").lstrip("="))
+
+    # Upstash Redis — постоянное хранение статистики (URL + токен из дашборда)
+    REDIS_URL: str = os.getenv("REDIS_URL", "")
+    REDIS_TOKEN: str = os.getenv("REDIS_TOKEN", "")
+
     # Webhook / Polling
     USE_WEBHOOK: bool = os.getenv("USE_WEBHOOK", "False").lower() == "true"
     WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
@@ -33,6 +40,15 @@ class Config:
     COOKIES_FROM_BROWSER: str = os.getenv("COOKIES_FROM_BROWSER", "")
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
+
+    # Cloudflare Worker — прокси для tikwm (обходит блокировку IP дата-центров).
+    # Если задан — запросы к tikwm идут через Worker, иначе напрямую.
+    TIKWM_PROXY_URL: str = os.getenv("TIKWM_PROXY_URL", "")
+
+    # Прокси для yt-dlp (например, на Render для обхода блокировок TikTok).
+    # Формат: http://user:pass@host:port или socks5://user:pass@host:port
+    PROXY_URL: str = os.getenv("PROXY_URL", "")
+
 
     @classmethod
     def validate(cls) -> list[str]:

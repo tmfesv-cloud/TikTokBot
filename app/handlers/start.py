@@ -3,11 +3,12 @@
 import logging
 
 from aiogram import F, Router
+from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.services import user_settings
+from app.services import stats, user_settings
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -24,30 +25,71 @@ def help_text() -> str:
         "📱 <b>Поддерживаемые платформы:</b>\n"
         "• TikTok — видео и фотопосты\n"
         "• Instagram Reels — видео и карусели\n"
-        "• YouTube Shorts — видео\n"
-        "• Pinterest — фото\n\n"
+        "• VK Видео — видео\n"
+        "• Rutube — видео\n"
+        "• Pinterest — фото\n"
+        "• Одноклассники — видео\n"
+        "• X / Twitter — видео\n"
+        "• Dailymotion, Vimeo, Twitch — видео\n"
+        "• Bilibili, Xiaohongshu — видео\n\n"
         "💡 <b>Команды:</b>\n"
         "• /settings — настройки скачивания\n"
         "• /clear — сбросить настройки\n"
+        "• /invite — пригласить друзей\n"
+        "• /feedback — отправить идею или предложение\n"
         "• /help — эта справка\n\n"
         "⚠️ <b>Ограничения:</b>\n"
-        f"• Файлы до {Config.MAX_VIDEO_MB} МБ (лимит Telegram)\n"
+        f"• Отправляю файлы до {Config.MAX_VIDEO_MB} МБ — большие видео "
+        "сожму в 720p\n"
+        "• Могу сжать большие видео (~до 6 минут) до 45 МБ — лимит Telegram\n"
         f"• Между запросами пауза {Config.DOWNLOAD_COOLDOWN_SEC} сек\n"
-        "• Видео из закрытых аккаунтов скачать нельзя\n"
+        "• Видео из закрытых аккаунтов скачать нельзя\n\n"
+        "🔊 <b>Нюансы:</b>\n"
+        "• Улучшение звука в TikTok может работать некорректно "
+        "(возможна задержка звука в видео)\n\n"
+        "🚀 <b>С развитием бота:</b>\n"
+        "• появится больше платформ — в том числе YouTube\n"
+        "• можно будет отправлять большие видео\n"
     )
 
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    """Приветствие."""
-    await message.answer(
-        "👋 Привет! Я - пуфик, скачиваю видео из TikTok.\n\n"
+    """Приветствие (в т.ч. переход по реферальной ссылке ?start=ref123)."""
+    u = message.from_user
+    stats.register_start(
+        u.id, stats.make_name(u.username, u.first_name)
+    )
+
+    greeting = (
+        "👋 Привет! Я - пуфик, скачиваю видео и фото с 15+ платформ: "
+        "TikTok, Instagram, VK, Rutube, Pinterest и других.\n\n"
         "Просто пришли мне ссылку на видео — и я скачаю его без водяного знака 🎬\n\n"
         "Команды:\n"
         "/help — справка\n"
-        "/settings — настройки скачивания",
-        parse_mode="HTML",
+        "/invite — пригласить друзей\n"
+        "/settings — настройки скачивания"
     )
+
+    # Переход по реферальной ссылке (?start=ref123)
+    text = message.text or ""
+    if " " in text:
+        payload = text.split(maxsplit=1)[1].strip()
+        ref = stats.register_referral(u.id, payload)
+        if ref:
+            greeting = f"🤝 Тебя пригласил(а) {ref['name']}!\n\n" + greeting
+            # Уведомляем пригласившего
+            try:
+                await message.bot.send_message(
+                    ref["user_id"],
+                    f"🎉 По твоей ссылке пришёл новый друг! "
+                    f"Всего приглашено: {ref['count']}.",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+
+    await message.answer(greeting, parse_mode="HTML")
     # Отправляем стикер приветствия (указывается в .env, STICKER_FILE_ID)
     if Config.STICKER_FILE_ID:
         try:
@@ -56,9 +98,74 @@ async def cmd_start(message: Message) -> None:
             logger.warning(f"Не удалось отправить стикер: {e}")
 
 
+@router.message(Command("invite"))
+async def cmd_invite(message: Message) -> None:
+    """Реферальная ссылка: приглашай друзей — польза всем."""
+    user = message.from_user
+    try:
+        me = await message.bot.get_me()
+        username = me.username or ""
+    except Exception:
+        username = ""
+    if not username:
+        await message.answer(
+            "😔 Не могу получить ссылку. Попробуй позже.",
+            parse_mode=None,
+        )
+        return
+    link = f"https://t.me/{username}?start=ref{user.id}"
+    count = stats.get_invites_count(user.id)
+    await message.answer(
+        "🤝 <b>Твоя ссылка для приглашения:</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        f"Приглашено друзей: <b>{count}</b>\n"
+        "Приглашай друзей — им удобно, а бот станет лучше!",
+        parse_mode="HTML",
+    )
+
+
+@router.my_chat_member()
+async def on_my_chat_member(update: ChatMemberUpdated) -> None:
+    """Приветствие при добавлении бота в группу."""
+    if update.chat.type not in ("group", "supergroup"):
+        return
+    # Приветствуем только при реальном добавлении (раньше бота не было),
+    # а не при назначении админом — иначе сообщения будут дублироваться
+    was_absent = update.old_chat_member.status in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    )
+    if was_absent and update.new_chat_member.status in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+    ):
+        await update.bot.send_message(
+            update.chat.id,
+            "👋 Всем привет! Я пуфик — скачиваю видео и фото с TikTok, "
+            "Instagram и Pinterest!\n\n"
+            "Просто пришли мне ссылку в чат — и я пришлю готовый результат 🎬\n\n"
+            "Команды:\n"
+            "/help — справка\n"
+            "/settings — настройки скачивания",
+            parse_mode="HTML",
+        )
+        # Второе сообщение: напоминание о правах администратора
+        await update.bot.send_message(
+            update.chat.id,
+            "🛡 <b>Важно:</b> для полноценной работы бота требуются права "
+            "администратора (для удаления команд).\n\n"
+            "Добавь меня в админы: Управление группой → Участники → "
+            "@PufikSaverBot → Назначить администратором",
+            parse_mode="HTML",
+        )
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    """Справка (удаляя сообщение пользователя)."""
+    """Справка (удаляя сообщение пользователя).
+
+    В группе отправляет справку в личку, чтобы её видел только запросивший.
+    """
     try:
         await message.delete()
     except Exception:
@@ -66,7 +173,21 @@ async def cmd_help(message: Message) -> None:
     kb = InlineKeyboardBuilder()
     kb.button(text="❌ Закрыть", callback_data="help:close")
     kb.adjust(1)
-    await message.answer(help_text(), reply_markup=kb.as_markup(), parse_mode="HTML")
+    kb_markup = kb.as_markup()
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.bot.send_message(
+                message.from_user.id, help_text(),
+                reply_markup=kb_markup, parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer(
+                help_text(), reply_markup=kb_markup, parse_mode="HTML"
+            )
+    else:
+        await message.answer(
+            help_text(), reply_markup=kb_markup, parse_mode="HTML"
+        )
 
 
 @router.callback_query(F.data == "help:close")
@@ -84,6 +205,18 @@ async def cmd_clear(message: Message) -> None:
     except Exception:
         pass
     user_id = message.from_user.id
-    _store = user_settings._store
-    _store.pop(user_id, None)
-    await message.answer("🧹 Настройки сброшены к дефолту.", parse_mode="HTML")
+    user_settings.reset(user_id)
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.bot.send_message(
+                user_id, "🧹 Настройки сброшены к дефолту.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await message.answer(
+                "🧹 Настройки сброшены к дефолту.", parse_mode="HTML"
+            )
+    else:
+        await message.answer(
+            "🧹 Настройки сброшены к дефолту.", parse_mode="HTML"
+        )

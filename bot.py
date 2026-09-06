@@ -20,12 +20,14 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 from aiogram.utils.token import TokenValidationError
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 from config import Config
-from app.handlers import start, settings, tiktok
+from app.handlers import admin, start, settings, tiktok
+from app.services import stats
 
 # Настройка логирования
 logging.basicConfig(
@@ -61,7 +63,15 @@ def _create_bot() -> Bot:
 
 
 async def on_startup(bot: Bot) -> None:
-    """Действия при запуске: установка вебхука."""
+    """Действия при запуске: меню команд + вебхук."""
+    # Синяя кнопка меню с командами
+    await bot.set_my_commands([
+        BotCommand(command="help", description="Справка"),
+        BotCommand(command="invite", description="Пригласить друзей"),
+        BotCommand(command="settings", description="Настройки скачивания"),
+        BotCommand(command="clear", description="Сбросить настройки"),
+    ])
+
     if Config.USE_WEBHOOK:
         base = Config.WEBHOOK_URL or os.getenv("RENDER_EXTERNAL_URL", "")
         if not base:
@@ -75,6 +85,14 @@ async def on_startup(bot: Bot) -> None:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Вебхук удалён, работаем в режиме polling")
 
+    # Уведомить владельца о запуске/перезапуске (rate-limit против crash-loop спама)
+    await stats.notify_owner(
+        bot,
+        "🔄 Бот перезапустился и работает.",
+        rate_key="startup",
+        rate_ttl=1800,
+    )
+
 
 async def on_shutdown(bot: Bot) -> None:
     """Действия при остановке: ничего не удаляем, чтобы webhook оставался."""
@@ -85,6 +103,7 @@ def create_dispatcher() -> Dispatcher:
     """Создаёт и настраивает диспетчер."""
     dp = Dispatcher(storage=MemoryStorage())
 
+    dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(settings.router)
     dp.include_router(tiktok.router)
@@ -147,8 +166,134 @@ def start_webhook() -> None:
             "bot": "Pufik",
         })
 
+    # Диагностика: проверка связи с tikwm/TikTok с IP Render + память процесса.
+    # Открыть в браузере https://tiktokbot-dxpr.onrender.com/diag
+    async def diag(request):
+        import aiohttp
+
+        def _rss_mb() -> float:
+            """RSS текущего процесса в МБ (Linux /proc)."""
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            return int(line.split()[1]) / 1024.0
+            except Exception:
+                pass
+            return 0.0
+
+        async def _probe(name: str, url: str) -> dict:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        url, timeout=aiohttp.ClientTimeout(total=15),
+                        allow_redirects=True,
+                    ) as r:
+                        body = await r.read()
+                        return {"name": name, "ok": True, "status": r.status,
+                                "bytes": len(body)}
+            except Exception as e:
+                return {"name": name, "ok": False, "error": str(e)[:150]}
+
+        # Реальный цикл tikwm-скачивания (как бот) с замером памяти на каждом шаге.
+        # URL из query ?url=... или тестовый.
+        url = request.query.get("url", "https://www.tiktok.com/t/ZP8n6mLjT/")
+        steps: list[dict] = []
+        rss0 = _rss_mb()
+
+        async def _tikwm_steps():
+            from app.services import tiktok_service as ts
+            import yt_dlp
+            steps.append({"step": "start", "rss_mb": round(rss0, 1),
+                          "ytdlp": yt_dlp.version.__version__})
+            try:
+                # ffmpeg есть?
+                import subprocess, shutil
+                ff = shutil.which("ffmpeg")
+                steps.append({"step": "ffmpeg", "path": ff or "NOT FOUND",
+                              "rss_mb": round(_rss_mb(), 1)})
+            except Exception as e:
+                steps.append({"step": "ffmpeg", "error": str(e)[:100]})
+
+            try:
+                # tikwm API запрос
+                async with aiohttp.ClientSession(headers=ts._HTTP_HEADERS) as s:
+                    async with s.get(
+                        "https://www.tikwm.com/api/",
+                        params={"url": url, "hd": 1},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as r:
+                        payload = await r.json(content_type=None)
+                    data = payload.get("data") or {}
+                    video_url = data.get("hdplay") or data.get("play")
+                    steps.append({
+                        "step": "tikwm_api",
+                        "code": payload.get("code"),
+                        "title": (data.get("title") or "")[:60],
+                        "hd_size": data.get("hd_size"),
+                        "duration": data.get("duration"),
+                        "rss_mb": round(_rss_mb(), 1),
+                    })
+                    if video_url:
+                        # Скачивание файла чанками (как в боте)
+                        async with s.get(
+                            video_url, timeout=aiohttp.ClientTimeout(total=120),
+                        ) as fr:
+                            size = 0
+                            with open("downloads/diag_test.mp4", "wb") as f:
+                                async for chunk in fr.content.iter_chunked(65536):
+                                    size += len(chunk)
+                                    f.write(chunk)
+                        steps.append({
+                            "step": "download_file",
+                            "http": fr.status,
+                            "bytes": size,
+                            "rss_mb": round(_rss_mb(), 1),
+                        })
+            except Exception as e:
+                steps.append({"step": "tikwm_download_error",
+                              "error": str(e)[:200],
+                              "rss_mb": round(_rss_mb(), 1)})
+
+        try:
+            await _tikwm_steps()
+        except Exception as e:
+            steps.append({"step": "outer_error", "error": str(e)[:200]})
+
+        # Полный цикл download() (как бот: сжатие + водяной знак через ffmpeg)
+        try:
+            from app.services import tiktok_service as ts
+            steps.append({"step": "full_download_start", "rss_mb": round(_rss_mb(), 1)})
+            result = await ts.download(url)
+            rss_after = _rss_mb()
+            import os
+            sizes = [round(os.path.getsize(f) / 1024, 1) for f in result.files]
+            steps.append({
+                "step": "full_download_done",
+                "rss_mb": round(rss_after, 1),
+                "delta_mb": round(rss_after - rss0, 1),
+                "files_kb": sizes,
+                "is_video": result.is_video,
+                "duration": result.duration,
+            })
+            result.cleanup()
+            steps.append({"step": "after_cleanup", "rss_mb": round(_rss_mb(), 1)})
+        except Exception as e:
+            steps.append({"step": "full_download_error",
+                          "error": type(e).__name__ + ": " + str(e)[:200],
+                          "rss_mb": round(_rss_mb(), 1)})
+
+        tikwm = await _probe("tikwm.com", "https://www.tikwm.com/api/")
+        tiktok = await _probe("tiktok.com", "https://www.tiktok.com/")
+        return web.json_response({
+            "rss_mb": round(rss0, 1),
+            "checks": [tikwm, tiktok],
+            "tikwm_download": steps,
+        })
+
     app.router.add_get("/", health)
     app.router.add_get("/ping", ping)
+    app.router.add_get("/diag", diag)
 
     # Настраиваем вебхук
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)

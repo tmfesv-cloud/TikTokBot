@@ -6,6 +6,8 @@
 import asyncio
 import logging
 import re
+import subprocess
+import textwrap
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,25 +16,74 @@ from pathlib import Path
 import aiohttp
 import yt_dlp
 
-from app.services import user_settings
+from app.services import stats, user_settings
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def _patch_vk_wallpost_audio_bug() -> None:
+    """Обход бага yt-dlp: VKWallPostIE падает, когда в посте data-audio — не объект.
+
+    yt-dlp 2026.07.04: строка `if not audio['url']:` кидает TypeError,
+    если ВК отдаёт аудио списком вместо объекта. Точечно заменяем эту строку
+    на безопасную проверку. Если структура метода изменится — просто не патчим.
+    """
+    try:
+        import inspect
+        import yt_dlp.extractor.vk as vk_mod
+
+        src = inspect.getsource(vk_mod.VKWallPostIE._real_extract)
+        new_src = textwrap.dedent(src).replace(
+            "if not audio['url']:",
+            "if not isinstance(audio, dict) or not audio.get('url'):",
+        )
+        if new_src == src:
+            return  # строка не найдена — версия другая, не трогаем
+
+        exec(compile(new_src, "<vk_patch>", "exec"), vk_mod.__dict__)
+        vk_mod.VKWallPostIE._real_extract = vk_mod.__dict__["_real_extract"]
+        logger.info("VK: применён патч бага с audio в постах со стены")
+    except Exception as e:
+        logger.warning(f"VK: не удалось применить патч audio-бага: {e}")
+
+
+_patch_vk_wallpost_audio_bug()
 
 # Расширения скачанных файлов
 _VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _MEDIA_EXTS = _VIDEO_EXTS | _IMAGE_EXTS
 
-# Поддерживаемые платформы: TikTok, Instagram, YouTube, Pinterest
+# Поддерживаемые платформы: TikTok, Instagram, YouTube, Pinterest, VK,
+# Rutube, Одноклассники, X/Twitter, Dailymotion, Likee, Vimeo, Twitch,
+# Tumblr, Bilibili, Xiaohongshu
+#
+# Короткие домены (x.com, ok.ru, dai.ly, pin.it, youtu.be, vk.com) матчим
+# с обязательной границей слова + не-буква/цифра перед доменом, чтобы не
+# ловить подстроки в чужих URL (example.com/x.com/...).
 _MEDIA_URL_RE = re.compile(
     r"(?:https?://)?"
     r"(?:"
     r"(?:www\.|m\.|vm\.|vt\.|v\.)?(?:tiktok|tik-tok)\.com"
     r"|(?:www\.|m\.)?instagram\.com"
-    r"|(?:www\.|m\.)?youtu(?:\.be|be\.com)"
-    r"|(?:www\.|m\.)?pinterest\.(?:com|co\.[a-z]{2})"
-    r"|pin\.it"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?youtu(?:\.be|be\.com)"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?pinterest\.(?:com|co\.[a-z]{2})"
+    r"|(?<![A-Za-z0-9])pin\.it"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?vk\.(?:com|ru)"
+    r"|(?:www\.|m\.)?vkvideo\.ru"
+    r"|(?:www\.|m\.)?rutube\.ru"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?(?:ok|odnoklassniki)\.ru"
+    r"|(?<![A-Za-z0-9])(?:www\.|m\.)?(?:x|twitter)\.com"
+    r"|(?:www\.|m\.)?dailymotion\.com"
+    r"|(?<![A-Za-z0-9])dai\.ly"
+    r"|(?:www\.|m\.)?likee\.(?:com|video)"
+    r"|(?:www\.|m\.)?vimeo\.com"
+    r"|(?:www\.|m\.)?twitch\.tv"
+    r"|(?:www\.)?tumblr\.com"
+    r"|(?:www\.|m\.)?bilibili\.com"
+    r"|(?:www\.)?xiaohongshu\.com"
+    r"|(?<![A-Za-z0-9])xhslink\.com"
     r")"
     r"/\S+",
     re.IGNORECASE,
@@ -40,6 +91,18 @@ _MEDIA_URL_RE = re.compile(
 
 # Ограничиваем число одновременных скачиваний
 _SEMAPHORE = asyncio.Semaphore(3)
+
+# Потолок размера исходного видео, которое качаем для последующего сжатия (МБ).
+# Файлы больше этого — сразу ошибка «слишком большой» (гигабайты не качаем).
+_COMPRESS_MAX_MB = 200
+
+# Жёсткие таймауты на скачивание (сек).
+# С серверных IP (Render) TikTok блокирует запросы: не рвёт соединение,
+# а молчит, и yt-dlp может виснуть навсегда, несмотря на socket_timeout.
+# Таймаут не даёт зависшему скачиванию повесить вебхук (иначе Telegram
+# получает 502, а Render перезапускает бота).
+_YDL_TIMEOUT_SEC = 120       # максимум на один вызов yt-dlp
+_TIKWM_TIMEOUT_SEC = 60      # максимум на tikwm (включая повторные попытки)
 
 # Заголовки для HTTP-запросов к TikTok CDN и tikwm (без UA они отдают 403)
 _HTTP_HEADERS = {
@@ -49,6 +112,23 @@ _HTTP_HEADERS = {
     ),
     "Referer": "https://www.tiktok.com/",
 }
+
+
+def _tikwm_api_url() -> str:
+    """URL для запросов к tikwm: через Cloudflare Worker (если настроен) или напрямую."""
+    return Config.TIKWM_PROXY_URL or "https://www.tikwm.com/api/"
+
+
+def _tikwm_api_params(url: str, hd: bool = True) -> dict | list[tuple]:
+    """Параметры запроса: для Worker — JSON body (POST), для прямого — query params (GET)."""
+    if Config.TIKWM_PROXY_URL:
+        return {"url": url, "hd": 1 if hd else 0}
+    return {"url": url, "hd": 1 if hd else 0}
+
+
+def _tikwm_method() -> str:
+    """HTTP метод: для Worker — POST (JSON body), для прямого — GET (query params)."""
+    return "POST" if Config.TIKWM_PROXY_URL else "GET"
 
 
 class TiktokError(Exception):
@@ -153,21 +233,75 @@ def extract_media_url(text: str) -> str | None:
     m = _MEDIA_URL_RE.search(text or "")
     if not m:
         return None
+    # Короткие домены (x.com, ok.ru, pin.it...) могут встретиться как подстрока
+    # в путях чужих ссылок (example.com/x.com/...). Если перед ссылкой стоит
+    # буква/цифра/точка/слеш — это не хост, отбрасываем. Схема "//" (https://)
+    # перед ссылкой — нормально, это начало хоста.
+    if m.start() > 0:
+        prev = text[m.start() - 1]
+        if prev.isalnum() or prev in "./?&#=_-":
+            if not (prev == "/" and m.start() >= 2 and text[m.start() - 2] == "/"):
+                return None
     url = m.group(0).rstrip(".,;:!?)]}>\"'")
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
     return url
 
 
+def detect_platform(url: str) -> str:
+    """Определяет платформу по ссылке: tiktok/instagram/youtube/pinterest/vk/..."""
+    if "tiktok" in url or "tik-tok" in url:
+        return "tiktok"
+    if "instagram" in url:
+        return "instagram"
+    if "youtu.be" in url or "youtube" in url:
+        return "youtube"
+    if "pinterest" in url or "pin.it" in url:
+        return "pinterest"
+    if "vk.com" in url or "vk.ru" in url or "vkvideo.ru" in url:
+        return "vk"
+    if "rutube.ru" in url:
+        return "rutube"
+    if "ok.ru" in url or "odnoklassniki.ru" in url:
+        return "ok"
+    if "twitter.com" in url or "x.com" in url:
+        return "twitter"
+    if "dailymotion.com" in url or "dai.ly" in url:
+        return "dailymotion"
+    if "likee.com" in url or "likee.video" in url:
+        return "likee"
+    if "vimeo.com" in url:
+        return "vimeo"
+    if "twitch.tv" in url:
+        return "twitch"
+    if "tumblr.com" in url:
+        return "tumblr"
+    if "bilibili.com" in url:
+        return "bilibili"
+    if "xiaohongshu.com" in url or "xhslink.com" in url:
+        return "xiaohongshu"
+    return "other"
+
+
 # --- Скачивание --------------------------------------------------------
 
-def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
+def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True,
+                platform: str | None = None) -> dict:
     """Опции yt-dlp для TikTok."""
-    opts = {
+    # VK и Rutube отдают через HLS/DASH, где размер неизвестен заранее —
+    # max_filesize не может остановить скачивание. Поэтому сразу ограничиваем
+    # качество до 720p, иначе yt-dlp хватает гигабайты (а на Render не хватит
+    # памяти/диска). VK ещё и склеивает видео+аудио через ffmpeg.
+    if platform in ("vk", "rutube"):
+        fmt = "bv[height<=720]+ba/b[height<=720]/b"
+    else:
         # HD — лучшее качество; SD — не выше 720p.
         # Предпочитаем единый mp4 (видео+аудио) — не требует ffmpeg.
         # `b` = формат с видео И аудио; если такого нет — берём лучшее.
-        "format": "b[ext=mp4]/b/best" if hd else "b[height<=720]/b/best",
+        fmt = "b[ext=mp4]/b/best" if hd else "b[height<=720]/b/best"
+
+    opts = {
+        "format": fmt,
         # Автономер, чтобы фотопосты (несколько картинок) не перезаписывали друг друга
         "outtmpl": str(out_dir / "%(id)s_%(autonumber)03d.%(ext)s"),
         "noplaylist": True,
@@ -178,11 +312,17 @@ def _build_opts(out_dir: Path, max_bytes: int, hd: bool = True) -> dict:
         "retries": 3,
         "noprogress": True,
     }
+    # VK и Rutube: склейка видео+аудио через ffmpeg (установлен в Dockerfile и на Render)
+    if platform in ("vk", "rutube"):
+        opts["merge_output_format"] = "mp4"
     # Если TikTok блокирует запросы — подставляем cookies из браузера или файла
     if Config.COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
     if Config.COOKIES_FILE:
         opts["cookiefile"] = Config.COOKIES_FILE
+    # Прокси для yt-dlp (если задан — все запросы идут через него)
+    if Config.PROXY_URL:
+        opts["proxy"] = Config.PROXY_URL
     return opts
 
 
@@ -191,8 +331,8 @@ def _classify_error(msg: str) -> TiktokError:
     lower = msg.lower()
     if "max-filesize" in lower or ("larger than" in lower and "filesize" in lower):
         return VideoTooLargeError(
-            f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт боту "
-            "отправлять такие файлы. Попробуй другое видео."
+            "📦 Видео слишком большое — даже сжатое не поместится в лимит "
+            "Telegram. Попробуй другое видео."
         )
     if any(k in lower for k in ("timed out", "timeout", "timedout")):
         return DownloadTimeoutError(
@@ -200,8 +340,8 @@ def _classify_error(msg: str) -> TiktokError:
         )
     if any(k in lower for k in ("blocked", "captcha", "verify")):
         return TiktokError(
-            "🛡 Сайт заблокировал запрос с этого IP. Попробуй другое видео "
-            "или другую ссылку."
+            "🛡 Платформа временно заблокировала запрос. "
+            "Попробуй другое видео или зайди позже."
         )
     if any(k in lower for k in ("404", "not found", "unavailable", "removed",
                                 "private", "account", "expired", "no longer exists")):
@@ -210,8 +350,116 @@ def _classify_error(msg: str) -> TiktokError:
         )
     # Всё остальное — общая ошибка без страшного технического текста
     return TiktokError(
-        "😔 Не удалось скачать это видео. Проверь ссылку и попробуй ещё раз."
+        "😔 Платформа временно недоступна. Попробуй позже или пришли другую ссылку."
     )
+
+
+async def get_duration(url: str) -> int | None:
+    """Быстро определяет длительность видео в секундах (без скачивания).
+
+    Нужно, чтобы решить, показывать ли "Скачиваю видео...".
+    Для TikTok идём через tikwm — это быстрее и не создаёт лишней нагрузки
+    на сам TikTok (меньше шансов поймать rate-limit перед скачиванием).
+    Для остальных — yt-dlp. Фотопосты возвращают 0/None — статус не
+    показывается.
+    """
+    return (await probe(url)).duration
+
+
+@dataclass
+class ProbeResult:
+    """Что узнали о ссылке до скачивания (без загрузки файлов)."""
+
+    is_playlist: bool = False          # ссылка ведёт на плейлист
+    playlist_count: int | None = None  # сколько роликов в плейлисте
+    duration: int | None = None        # длительность (у видео)
+    is_tiktok_photo: bool = False      # TikTok-фотопост
+
+
+async def probe(url: str) -> ProbeResult:
+    """Быстро узнаёт тип ссылки: видео / плейлист / TikTok-фото.
+
+    Один лёгкий запрос метаданных. Используется, чтобы решить:
+    - показывать ли "Скачиваю видео..." (длительность > 120 сек);
+    - спросить ли "Скачать весь плейлист?".
+    """
+    if detect_platform(url) == "tiktok":
+        try:
+            async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
+                api_url = _tikwm_api_url()
+                params = {"url": url, "hd": 1}
+                method = _tikwm_method()
+                kwargs = {"timeout": aiohttp.ClientTimeout(total=15)}
+                if method == "POST":
+                    kwargs["json"] = params
+                else:
+                    kwargs["params"] = params
+
+                async with session.request(method, api_url, **kwargs) as resp:
+                    payload = await resp.json(content_type=None)
+            if isinstance(payload, dict) and payload.get("code") in (0, 200):
+                data = payload.get("data") or {}
+                # Фото: images есть, duration=0. Видео: duration>0.
+                if data.get("images"):
+                    return ProbeResult(is_tiktok_photo=True)
+                return ProbeResult(duration=data.get("duration"))
+            return ProbeResult()
+        except Exception:
+            return ProbeResult()
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": False,      # не резать плейлисты — узнаём про них
+        "extract_flat": True,     # только метаданные, без скачивания роликов
+    }
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
+    try:
+        info = await asyncio.to_thread(
+            lambda: yt_dlp.YoutubeDL(opts).extract_info(url, download=False)
+        )
+    except Exception:
+        return ProbeResult()
+    if not isinstance(info, dict):
+        return ProbeResult()
+
+    if info.get("_type") == "playlist":
+        return ProbeResult(
+            is_playlist=True,
+            playlist_count=info.get("playlist_count"),
+        )
+    return ProbeResult(duration=info.get("duration"))
+
+
+def _get_playlist_urls_sync(url: str, limit: int) -> list[str] | None:
+    """Собирает прямые ссылки на ролики плейлиста (без скачивания)."""
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,  # берём только метаданные, не качаем ролики
+    }
+    if Config.COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = (Config.COOKIES_FROM_BROWSER,)
+    if Config.COOKIES_FILE:
+        opts["cookiefile"] = Config.COOKIES_FILE
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not isinstance(info, dict) or info.get("_type") != "playlist":
+        return None
+    urls: list[str] = []
+    for e in (info.get("entries") or [])[:limit]:
+        u = e.get("url") if isinstance(e, dict) else None
+        if u and u.startswith("http"):
+            urls.append(u)
+    return urls or None
+
+
+async def get_playlist_urls(url: str, limit: int = 25) -> list[str] | None:
+    """Прямые ссылки на первые `limit` роликов плейлиста (или None)."""
+    return await asyncio.to_thread(_get_playlist_urls_sync, url, limit)
 
 
 def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> DownloadResult:
@@ -221,15 +469,19 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
     req_dir = out_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
     req_dir.mkdir()
 
+    platform = detect_platform(url)
+    opts = _build_opts(req_dir, max_bytes, hd, platform)
+
     try:
-        with yt_dlp.YoutubeDL(_build_opts(req_dir, max_bytes, hd)) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except yt_dlp.utils.UnsupportedError as e:
         _rmtree(req_dir)
         logger.warning(f"Неподдерживаемый URL {url}: {e}")
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube Shorts, Pinterest."
+            "Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
+            "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         ) from e
     except yt_dlp.utils.DownloadError as e:
         _rmtree(req_dir)
@@ -239,7 +491,7 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         _rmtree(req_dir)
         logger.exception(f"Неожиданная ошибка yt-dlp для {url}")
         raise TiktokError(
-            "😔 Что-то пошло не так при скачивании. Попробуй ещё раз."
+            "😔 Платформа временно недоступна. Попробуй позже."
         ) from e
 
     # Собираем скачанные файлы (1 видео или несколько фото)
@@ -285,8 +537,8 @@ async def _download_file(
                 size += len(chunk)
                 if size > max_bytes:
                     raise VideoTooLargeError(
-                        f"📦 Файл больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
-                        "боту отправлять такие файлы."
+                        "📦 Файл слишком большой — даже сжатое не поместится "
+                        "в лимит Telegram."
                     )
                 f.write(chunk)
         if size == 0:
@@ -297,6 +549,183 @@ def _tikwm_author(data: dict) -> str:
     """Автор из ответа tikwm (словарь author)."""
     a = data.get("author") or {}
     return a.get("nickname") or a.get("unique_id") or ""
+
+
+async def _improve_tiktok_audio(
+    result: DownloadResult, url: str, user_id: int | None = None
+) -> DownloadResult:
+    """Подмешивает оригинальный трек TikTok вместо слабой дорожки (~64 kbps).
+
+    Улучшение только если у пользователя включена настройка improve_audio
+    (панель /settings). Берёт music URL из tikwm, качает mp3 и через ffmpeg
+    заменяет аудио-дорожку видео на него. При любой ошибке возвращает исходный
+    result — без падений.
+    """
+    s = user_settings.get(user_id) if user_id else None
+    if not (s and s.improve_audio):
+        return result
+    if not result.is_video or not result.files or not result._dir:
+        return result
+
+    video = result.files[0]
+    req_dir = result._dir
+    music_path = req_dir / "orig_music.mp3"
+    improved_path = req_dir / "improved.mp4"
+
+    try:
+        # 1. Узнаём URL оригинального трека через tikwm и качаем его
+        async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
+            api_url = _tikwm_api_url()
+            params = {"url": url, "hd": 1}
+            method = _tikwm_method()
+            kwargs = {"timeout": aiohttp.ClientTimeout(total=30)}
+            if method == "POST":
+                kwargs["json"] = params
+            else:
+                kwargs["params"] = params
+
+            async with session.request(method, api_url, **kwargs) as resp:
+                payload = await resp.json(content_type=None)
+            data = payload.get("data") or {}
+            music_url = data.get("music")
+            if not music_url:
+                logger.info("TikTok audio: нет music URL — оставляем как есть")
+                return result
+
+            # 2. Качаем трек
+            await _download_file(session, music_url, music_path, 50 * 1024 * 1024)
+
+        # 3. Подмешиваем через ffmpeg (видео без перекодирования, звук из трека)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video),
+            "-i", str(music_path),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            str(improved_path),
+        ]
+        proc = await asyncio.to_thread(
+            lambda: subprocess.run(cmd, capture_output=True, timeout=180)
+        )
+        if proc.returncode != 0 or not improved_path.exists() or improved_path.stat().st_size == 0:
+            logger.warning("TikTok audio: ffmpeg не сработал, оставляем оригинал")
+            return result
+
+        # Заменяем файл видео на улучшенный
+        result.files = [improved_path]
+        video.unlink(missing_ok=True)
+        logger.info("TikTok audio: улучшено до 128 kbps")
+    except Exception as e:
+        logger.warning(f"TikTok audio: улучшение не удалось ({e}), оставляем оригинал")
+    finally:
+        music_path.unlink(missing_ok=True)
+
+    return result
+
+
+def _probe_height(path: Path) -> int | None:
+    """Высота видео через ffprobe (None, если не смогли узнать)."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=height",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        return int(probe.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+
+def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | None:
+    """Сжимает видео через ffmpeg до target_bytes.
+
+    Понижает разрешение до 720p (если выше), затем пробует -crf 28 → 32 → 36,
+    пока размер не влезет в лимит. Возвращает путь к сжатому файлу или None,
+    если не влезло даже на crf=36 (вызывающий покажет ошибку).
+    """
+    out = out_dir / "compressed.mp4"
+
+    # Определяем разрешение: если выше 720p — масштабируем, это резко
+    # сокращает работу и размер (обычно достаточно одного прохода).
+    height = _probe_height(src)
+    vf = []
+    if height and height > 720:
+        vf = ["-vf", "scale=-2:720"]
+
+    for crf in (28, 32, 36):
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(src),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", str(crf),
+        ]
+        if vf:
+            cmd += vf
+        cmd += [
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-movflags", "+faststart",
+            str(out),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=600)
+        except FileNotFoundError:
+            logger.debug("ffmpeg не найден — сжатие видео невозможно")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg timeout при сжатии видео")
+            return None
+        if proc.returncode != 0:
+            logger.warning(f"ffmpeg не сжал видео (crf={crf}): {proc.stderr[:200]}")
+            continue
+        if out.exists() and out.stat().st_size <= target_bytes:
+            logger.info(f"Видео сжато до {out.stat().st_size // 1024 // 1024} МБ (crf={crf})")
+            return out
+    # Не влезло даже на crf=36 — не отдаём файл больше лимита
+    return None
+
+
+async def _ensure_size(result: DownloadResult) -> DownloadResult:
+    """Сжимает видео, если оно больше лимита Telegram (45 МБ).
+
+    Скачивание идёт с потолком _COMPRESS_MAX_MB (200 МБ), поэтому сюда
+    попадают файлы 45–200 МБ. Меньше лимита — отдаём как есть, без сжатия.
+    """
+    if not result.is_video or not result.files or not result._dir:
+        return result
+    limit = Config.MAX_VIDEO_MB * 1024 * 1024
+    if result.files[0].stat().st_size <= limit:
+        return result
+
+    compressed = await asyncio.to_thread(
+        _compress_video_sync, result.files[0], result._dir, limit
+    )
+    if compressed:
+        logger.info("Большое видео сжато и будет отправлено")
+        result.files = [compressed]
+        return result
+
+    # Не влезло в лимит даже после сжатия — отдаём понятную ошибку,
+    # а не пытаемся отправить файл, который Telegram всё равно отклонит.
+    raise VideoTooLargeError(
+        "📦 Видео слишком большое — не удалось сжать до лимита Telegram. "
+        "Попробуй другое видео."
+    )
+
+
+async def _finish(result: DownloadResult) -> DownloadResult:
+    """Финальная обработка: сжатие до лимита если нужно."""
+    return await _ensure_size(result)
+
 
 
 def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> DownloadResult:
@@ -342,8 +771,8 @@ def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> D
         raise VideoUnavailableError("😔 Не удалось получить видео из пина.")
     if any(p.stat().st_size > max_bytes for p in files):
         raise VideoTooLargeError(
-            f"📦 Видео больше {Config.MAX_VIDEO_MB} МБ — Telegram не даёт "
-            "боту отправлять такие файлы."
+            "📦 Видео слишком большое — даже сжатое не поместится в лимит "
+            "Telegram."
         )
     return DownloadResult(
         files=files,
@@ -488,84 +917,119 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
     req_dir = out_dir / f"{int(time.time() * 1000)}-tikwm-{uuid.uuid4().hex[:8]}"
     req_dir.mkdir()
 
+    async def _try_once(session: aiohttp.ClientSession) -> DownloadResult:
+        """Один цикл: запрос tikwm + загрузка файлов.
+
+        Возвращает результат или бросает VideoUnavailableError, если файлы
+        не скачались. Подписанные ссылки tikwm истекают (CDN отдаёт 403),
+        поэтому при неудаче вызывающий перезапрашивает свежие ссылки.
+        """
+        api_url = _tikwm_api_url()
+        params = {"url": url, "hd": 1 if hd else 0}
+        method = _tikwm_method()
+        kwargs = {"timeout": aiohttp.ClientTimeout(total=20, connect=10)}
+        if method == "POST":
+            kwargs["json"] = params
+        else:
+            kwargs["params"] = params
+
+        async with session.request(method, api_url, **kwargs) as resp:
+            if resp.status != 200:
+                logger.warning(f"tikwm: HTTP {resp.status} для {url}")
+                raise VideoUnavailableError(
+                    "😔 Сервис скачивания временно недоступен."
+                )
+            payload = await resp.json(content_type=None)
+
+        if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
+            msg = payload.get("msg") or "Неизвестная ошибка tikwm"
+            logger.warning(f"tikwm ошибка (code={payload.get('code')}): {msg}")
+            raise VideoUnavailableError(
+                f"😔 Не удалось скачать: {msg}"
+            )
+
+        data = payload.get("data") or {}
+        images = data.get("images") or []
+        video_url = data.get("hdplay") or data.get("play")
+
+        # Фотопост — качаем все фото + музыку
+        if images:
+            files: list[Path] = []
+            for i, img_url in enumerate(images[:20], 1):
+                dest = req_dir / f"{i:02d}.jpg"
+                try:
+                    await _download_file(session, img_url, dest, max_bytes)
+                    files.append(dest)
+                except VideoTooLargeError:
+                    raise
+                except VideoUnavailableError:
+                    continue  # одно фото не скачалось — пробуем остальные
+            if not files:
+                raise VideoUnavailableError("😔 Не удалось скачать фотопост.")
+
+            # Качаем аудио музыки (если есть)
+            audio_file = None
+            music_url = data.get("music")
+            if music_url:
+                audio_dest = req_dir / "music.mp3"
+                try:
+                    await _download_file(session, music_url, audio_dest, max_bytes)
+                    if audio_dest.stat().st_size > 0:
+                        audio_file = audio_dest
+                except (VideoTooLargeError, VideoUnavailableError):
+                    pass  # аудио необязательно — если не скачалось, просто не отправим
+
+            return DownloadResult(
+                files=files,
+                is_video=False,
+                title=data.get("title") or "",
+                author=_tikwm_author(data),
+                audio_file=audio_file,
+                _dir=req_dir,
+            )
+
+        # Видео — качаем один файл
+        if video_url:
+            dest = req_dir / "video.mp4"
+            try:
+                await _download_file(session, video_url, dest, max_bytes)
+            except (VideoTooLargeError, VideoUnavailableError):
+                raise
+            return DownloadResult(
+                files=[dest],
+                is_video=True,
+                title=data.get("title") or "",
+                author=_tikwm_author(data),
+                duration=data.get("duration") or None,
+                _dir=req_dir,
+            )
+
+        raise VideoUnavailableError("😔 Не удалось получить ссылки на файлы.")
+
     try:
         async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
-            # 1. Узнаём прямые ссылки через API (hd=1/0 — качество)
-            async with session.get(
-                "https://www.tikwm.com/api/",
-                params={"url": url, "hd": 1 if hd else 0},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                payload = await resp.json(content_type=None)
-
-            if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
-                _rmtree(req_dir)
-                raise VideoUnavailableError(
-                    "😔 Не удалось скачать это видео. Возможно, оно удалено "
-                    "или ссылка битая."
-                )
-
-            data = payload.get("data") or {}
-            images = data.get("images") or []
-            video_url = data.get("hdplay") or data.get("play")
-
-            # 2. Фотопост — качаем все фото + музыку
-            if images:
-                files: list[Path] = []
-                for i, img_url in enumerate(images[:20], 1):
-                    dest = req_dir / f"{i:02d}.jpg"
-                    try:
-                        await _download_file(session, img_url, dest, max_bytes)
-                        files.append(dest)
-                    except VideoTooLargeError:
-                        _rmtree(req_dir)
-                        raise
-                    except VideoUnavailableError:
-                        continue  # одно фото не скачалось — пробуем остальные
-                if not files:
-                    _rmtree(req_dir)
-                    raise VideoUnavailableError("😔 Не удалось скачать фотопост.")
-
-                # Качаем аудио музыки (если есть)
-                audio_file = None
-                music_url = data.get("music")
-                if music_url:
-                    audio_dest = req_dir / "music.mp3"
-                    try:
-                        await _download_file(session, music_url, audio_dest, max_bytes)
-                        if audio_dest.stat().st_size > 0:
-                            audio_file = audio_dest
-                    except (VideoTooLargeError, VideoUnavailableError):
-                        pass  # аудио необязательно — если не скачалось, просто не отправим
-
-                return DownloadResult(
-                    files=files,
-                    is_video=False,
-                    title=data.get("title") or "",
-                    author=_tikwm_author(data),
-                    audio_file=audio_file,
-                    _dir=req_dir,
-                )
-
-            # 3. Видео — качаем один файл
-            if video_url:
-                dest = req_dir / "video.mp4"
+            # Подписанные CDN-ссылки tikwm быстро истекают (403). Если файлы
+            # не скачались — перезапрашиваем свежие ссылки, до 3 циклов.
+            last_error: Exception | None = None
+            for attempt in range(5):
                 try:
-                    await _download_file(session, video_url, dest, max_bytes)
-                except (VideoTooLargeError, VideoUnavailableError):
+                    return await _try_once(session)
+                except VideoTooLargeError:
                     _rmtree(req_dir)
                     raise
-                return DownloadResult(
-                    files=[dest],
-                    is_video=True,
-                    title=data.get("title") or "",
-                    author=_tikwm_author(data),
-                    duration=data.get("duration") or None,
-                    _dir=req_dir,
-                )
-
+                except VideoUnavailableError as e:
+                    last_error = e
+                    err_text = str(e)
+                    logger.warning(f"tikwm попытка {attempt+1}/5: {err_text[:100]}")
+                    # tikwm ответил ошибкой — повторять бессмысленно, если
+                    # сервис недоступен (403/5xx) или видео удалено/битое.
+                    if "удалено" in err_text or "недоступен" in err_text or "Limit" in err_text:
+                        break
+                    if attempt == 4:
+                        break
+                    await asyncio.sleep(1.5)
             _rmtree(req_dir)
-            raise VideoUnavailableError("😔 Не удалось получить ссылки на файлы.")
+            raise last_error if last_error else VideoUnavailableError("😔 Не удалось скачать.")
 
     except aiohttp.ClientError as e:
         _rmtree(req_dir)
@@ -577,10 +1041,39 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise TiktokError("tikwm: плохой ответ") from e
 
 
-async def download(url: str, user_id: int | None = None) -> DownloadResult:
-    """Скачивает видео или фотопост по ссылке TikTok.
+async def _download_sync_timed(
+    url: str, out_dir: Path, max_bytes: int, hd: bool = True
+) -> DownloadResult:
+    """yt-dlp с жёстким таймаутом (иначе зависнет навсегда на Render).
 
-    user_id — для применения личных настроек (качество, лимит размера).
+    yt-dlp вызывается в потоке, который нельзя прервать из asyncio, поэтому
+    при таймауте поток остаётся висеть в фоне, но основной код уже бросает
+    ошибку и может переключиться на tikwm.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_download_sync, url, out_dir, max_bytes, hd),
+            timeout=_YDL_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"yt-dlp завис (> {_YDL_TIMEOUT_SEC}с): {url}")
+        raise DownloadTimeoutError(
+            "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+        )
+
+
+async def download(
+    url: str,
+    user_id: int | None = None,
+    is_tiktok_photo: bool | None = None,
+) -> DownloadResult:
+    """Скачивает видео или фотопост по ссылке.
+
+    user_id — для применения настроек пользователя (качество).
+    is_tiktok_photo — если заранее известно, что это TikTok-фотопост
+    (хендлер узнал через get_duration), идём сразу в tikwm, минуя
+    yt-dlp (он фотопосты TikTok не умеет — только тратит время
+    и создаёт лишнюю нагрузку на TikTok). None — не знаем, решаем по факту.
     Бросает TiktokError при любых проблемах.
     """
     # Сразу отсекаем неподдерживаемые ссылки
@@ -588,10 +1081,17 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
     if not normalized:
         raise UnsupportedUrlError(
             "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
-            "YouTube Shorts, Pinterest."
+            "Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
+            "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         )
 
-    # Личные настройки пользователя (качество)
+    # vk.ru — тот же сайт, но yt-dlp знает только vk.com
+    # (vkvideo.ru не трогаем — у него свой extractor)
+    if "vk.ru" in normalized:
+        normalized = re.sub(r"vk\.ru", "vk.com", normalized)
+        logger.info(f"VK: нормализован домен -> {normalized}")
+
+    # Настройки пользователя (качество)
     s = user_settings.get(user_id) if user_id else None
     hd = s.hd if s else True
 
@@ -600,35 +1100,53 @@ async def download(url: str, user_id: int | None = None) -> DownloadResult:
     # Pinterest — кастомный парсинг (yt-dlp не умеет картинки)
     is_pinterest = bool(re.search(r"pinterest\.(?:com|co\.\w+)|pin\.it", normalized))
 
-    max_bytes = Config.MAX_VIDEO_MB * 1024 * 1024
+    # Потолок скачивания — 200 МБ (чтобы потом можно было сжать до 45 МБ).
+    # Файлы больше 200 МБ отсекаются ещё на этапе скачивания.
+    max_bytes = _COMPRESS_MAX_MB * 1024 * 1024
     out_dir = Path(Config.DOWNLOADS_DIR)
     logger.info(f"Скачивание (hd={hd}): {normalized}")
     async with _SEMAPHORE:
         # Pinterest — сразу кастомный путь (yt-dlp не извлекает картинки)
         if is_pinterest:
             try:
-                return await _download_pinterest(normalized, out_dir, max_bytes)
+                result = await _download_pinterest(normalized, out_dir, max_bytes)
+                return await _finish(result)
             except TiktokError:
                 raise
 
-        # Остальное — через yt-dlp
-        try:
-            return await asyncio.to_thread(
-                _download_sync, normalized, out_dir, max_bytes, hd
-            )
-        except (VideoTooLargeError, UnsupportedUrlError):
-            # Эти ошибки уже точные — fallback не нужен
-            raise
-        except TiktokError as primary:
-            # yt-dlp не справился — пробуем tikwm (только для TikTok)
-            if is_tiktok:
-                logger.info(f"yt-dlp не смог, пробуем tikwm: {normalized}")
-                try:
-                    return await _download_via_tikwm(
-                        normalized, out_dir, max_bytes, hd
-                    )
-                except (VideoTooLargeError, VideoUnavailableError):
-                    raise
-                except TiktokError:
-                    raise primary from None
-            raise
+        # TikTok — ТОЛЬКО tikwm. С серверных IP (Render) yt-dlp блокируется
+        # TikTok не ошибкой, а вечным зависанием + утечкой памяти (OOM 512MB).
+        # Поэтому для TikTok yt-dlp НЕ вызываем вообще: если tikwm не справился,
+        # даём понятную ошибку, а не рискуем уронить весь инстанс.
+        if is_tiktok:
+            try:
+                result = await asyncio.wait_for(
+                    _download_via_tikwm(normalized, out_dir, max_bytes, hd),
+                    timeout=_TIKWM_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"tikwm завис (> {_TIKWM_TIMEOUT_SEC}с): {normalized}")
+                raise DownloadTimeoutError(
+                    "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+                )
+            except (VideoTooLargeError, VideoUnavailableError):
+                # Эти ошибки уже точные — переводим как есть
+                raise
+            except TiktokError:
+                # tikwm недоступен. yt-dlp для TikTok на Render не пробуем —
+                # он зависает и роняет инстанс от нехватки памяти.
+                logger.warning(f"tikwm не смог (yt-dlp не используем): {normalized}")
+                raise TiktokError(
+                    "😔 Сервис скачивания TikTok временно недоступен. "
+                    "Попробуй ещё раз через минуту."
+                )
+            # TikTok: улучшаем звук (если включено в настройках)
+            if result.is_video:
+                result = await _improve_tiktok_audio(result, normalized, user_id)
+            return await _finish(result)
+
+        # Остальные платформы — через yt-dlp (с жёстким таймаутом)
+        result = await _download_sync_timed(
+            normalized, out_dir, max_bytes, hd
+        )
+        return await _finish(result)
