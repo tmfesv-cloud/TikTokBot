@@ -37,6 +37,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _log_config() -> None:
+    """Логирует конфигурацию бота."""
+    logger.info(f"TikTokBot v1.0 запускается")
+    if Config.PROXY_URL:
+        logger.info(f"PROXY_URL настроен: {Config.PROXY_URL[:20]}...")
+    else:
+        logger.info("PROXY_URL не задан")
+    if Config.COOKIES_FILE:
+        logger.info(f"COOKIES_FILE: {Config.COOKIES_FILE}")
+    if Config.COOKIES_FROM_BROWSER:
+        logger.info(f"COOKIES_FROM_BROWSER: {Config.COOKIES_FROM_BROWSER}")
+
+
 def _get_proxy() -> str | None:
     """Определяет системный прокси для aiohttp (если есть)."""
     proxies = getproxies()
@@ -323,6 +336,8 @@ def main() -> None:
             Config.WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
     _cleanup_old_downloads()
+
+    _log_config()
 
     logger.info(f"TikTokBot запускается... Режим: {'webhook' if Config.USE_WEBHOOK else 'polling'}")
 
