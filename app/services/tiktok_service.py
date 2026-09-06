@@ -1126,36 +1126,60 @@ async def download(
             except TiktokError:
                 raise
 
-        # TikTok — ТОЛЬКО tikwm. С серверных IP (Render) yt-dlp блокируется
-        # TikTok не ошибкой, а вечным зависанием + утечкой памяти (OOM 512MB).
-        # Поэтому для TikTok yt-dlp НЕ вызываем вообще: если tikwm не справился,
-        # даём понятную ошибку, а не рискуем уронить весь инстанс.
+        # TikTok — через yt-dlp с прокси (если настроен) или tikwm без прокси.
+        # С серверных IP (Render) yt-dlp может зависнуть (бесконечный таймаут),
+        # поэтому используем жёсткий таймаут. Прокси помогает обойти блокировки.
         if is_tiktok:
-            try:
-                result = await asyncio.wait_for(
-                    _download_via_tikwm(normalized, out_dir, max_bytes, hd),
-                    timeout=_TIKWM_TIMEOUT_SEC,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"tikwm завис (> {_TIKWM_TIMEOUT_SEC}с): {normalized}")
-                raise DownloadTimeoutError(
-                    "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
-                )
-            except (VideoTooLargeError, VideoUnavailableError):
-                # Эти ошибки уже точные — переводим как есть
-                raise
-            except TiktokError:
-                # tikwm недоступен. yt-dlp для TikTok на Render не пробуем —
-                # он зависает и роняет инстанс от нехватки памяти.
-                logger.warning(f"tikwm не смог (yt-dlp не используем): {normalized}")
-                raise TiktokError(
-                    "😔 Сервис скачивания TikTok временно недоступен. "
-                    "Попробуй ещё раз через минуту."
-                )
-            # TikTok: улучшаем звук (если включено в настройках)
-            if result.is_video:
-                result = await _improve_tiktok_audio(result, normalized, user_id)
-            return await _finish(result)
+            if Config.PROXY_URL:
+                # Используем yt-dlp с прокси — он умеет обходить блокировки TikTok
+                logger.info(f"TikTok: используем yt-dlp с прокси")
+                try:
+                    result = await asyncio.wait_for(
+                        _download_sync_timed(normalized, out_dir, max_bytes, hd),
+                        timeout=_YDL_TIMEOUT_SEC,
+                    )
+                    # TikTok: улучшаем звук (если включено в настройках)
+                    if result.is_video:
+                        result = await _improve_tiktok_audio(result, normalized, user_id)
+                    return await _finish(result)
+                except asyncio.TimeoutError:
+                    logger.warning(f"yt-dlp завис (> {_YDL_TIMEOUT_SEC}с): {normalized}")
+                    raise DownloadTimeoutError(
+                        "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+                    )
+                except (VideoTooLargeError, VideoUnavailableError):
+                    raise
+                except TiktokError as e:
+                    logger.warning(f"yt-dlp не смог: {normalized}, ошибка: {e}")
+                    raise TiktokError(
+                        "😔 Не удалось скачать видео через прокси. "
+                        "Проверь правильность PROXY_URL."
+                    )
+            else:
+                # Без прокси — идём в tikwm
+                logger.info(f"TikTok: используем tikwm (без прокси)")
+                try:
+                    result = await asyncio.wait_for(
+                        _download_via_tikwm(normalized, out_dir, max_bytes, hd),
+                        timeout=_TIKWM_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"tikwm завис (> {_TIKWM_TIMEOUT_SEC}с): {normalized}")
+                    raise DownloadTimeoutError(
+                        "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+                    )
+                except (VideoTooLargeError, VideoUnavailableError):
+                    raise
+                except TiktokError:
+                    logger.warning(f"tikwm не смог: {normalized}")
+                    raise TiktokError(
+                        "😔 Сервис скачивания TikTok временно недоступен. "
+                        "Попробуй ещё раз через минуту."
+                    )
+                # TikTok: улучшаем звук (если включено в настройках)
+                if result.is_video:
+                    result = await _improve_tiktok_audio(result, normalized, user_id)
+                return await _finish(result)
 
         # Остальные платформы — через yt-dlp (с жёстким таймаутом)
         result = await _download_sync_timed(
