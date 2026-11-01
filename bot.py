@@ -27,7 +27,7 @@ from aiohttp import web
 
 from config import Config
 from app.handlers import admin, start, settings, tiktok
-from app.services import stats
+from app.services import stats, proxy_manager
 
 # Настройка логирования
 logging.basicConfig(
@@ -76,7 +76,15 @@ def _create_bot() -> Bot:
 
 
 async def on_startup(bot: Bot) -> None:
-    """Действия при запуске: меню команд + вебхук."""
+    """Действия при запуске: меню команд + вебхук + прокси."""
+    # Инициализируем прокси
+    await proxy_manager.init_proxy_manager()
+    pm = proxy_manager.get_proxy_manager()
+    if pm and pm._proxies:
+        logger.info(f"Proxy: загружено {len(pm._proxies)} прокси")
+    else:
+        logger.warning("Proxy: не найдено рабочих прокси")
+
     # Синяя кнопка меню с командами
     await bot.set_my_commands([
         BotCommand(command="help", description="Справка"),
