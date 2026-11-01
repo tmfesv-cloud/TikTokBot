@@ -338,26 +338,26 @@ def _classify_error(msg: str) -> TiktokError:
     lower = msg.lower()
     if "max-filesize" in lower or ("larger than" in lower and "filesize" in lower):
         return VideoTooLargeError(
-            "📦 Видео слишком большое — даже сжатое не поместится в лимит "
+            "Видео слишком большое — даже сжатое не поместится в лимит "
             "Telegram. Попробуй другое видео."
         )
     if any(k in lower for k in ("timed out", "timeout", "timedout")):
         return DownloadTimeoutError(
-            "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+            "Скачивание заняло слишком много времени. Попробуй ещё раз."
         )
     if any(k in lower for k in ("blocked", "captcha", "verify")):
         return TiktokError(
-            "🛡 Платформа временно заблокировала запрос. "
+            "Платформа временно заблокировала запрос. "
             "Попробуй другое видео или зайди позже."
         )
     if any(k in lower for k in ("404", "not found", "unavailable", "removed",
                                 "private", "account", "expired", "no longer exists")):
         return VideoUnavailableError(
-            "😔 Видео не найдено. Возможно, оно удалено, скрыто или ссылка битая."
+            "Видео не найдено. Возможно, оно удалено, скрыто или ссылка битая."
         )
     # Всё остальное — общая ошибка без страшного технического текста
     return TiktokError(
-        "😔 Платформа временно недоступна. Попробуй позже или пришли другую ссылку."
+        "Платформа временно недоступна. Попробуй позже или пришли другую ссылку."
     )
 
 
@@ -486,7 +486,7 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         _rmtree(req_dir)
         logger.warning(f"Неподдерживаемый URL {url}: {e}")
         raise UnsupportedUrlError(
-            "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
+            "Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
             "Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
             "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         ) from e
@@ -498,7 +498,7 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         _rmtree(req_dir)
         logger.exception(f"Неожиданная ошибка yt-dlp для {url}")
         raise TiktokError(
-            "😔 Платформа временно недоступна. Попробуй позже."
+            "Платформа временно недоступна. Попробуй позже."
         ) from e
 
     # Собираем скачанные файлы (1 видео или несколько фото)
@@ -510,7 +510,7 @@ def _download_sync(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> 
         _rmtree(req_dir)
         logger.warning(f"Ничего не скачалось для {url}")
         raise VideoUnavailableError(
-            "😔 Не удалось получить файлы. Возможно, видео недоступно."
+            "Не удалось получить файлы. Возможно, видео недоступно."
         )
 
     result = DownloadResult(
@@ -537,19 +537,19 @@ async def _download_file(
         file_url, timeout=aiohttp.ClientTimeout(total=120)
     ) as resp:
         if resp.status != 200:
-            raise VideoUnavailableError("😔 Не удалось скачать файл с CDN.")
+            raise VideoUnavailableError("Не удалось скачать файл с CDN.")
         size = 0
         with open(dest, "wb") as f:
             async for chunk in resp.content.iter_chunked(65536):
                 size += len(chunk)
                 if size > max_bytes:
                     raise VideoTooLargeError(
-                        "📦 Файл слишком большой — даже сжатое не поместится "
+                        "Файл слишком большой — даже сжатое не поместится "
                         "в лимит Telegram."
                     )
                 f.write(chunk)
         if size == 0:
-            raise VideoUnavailableError("😔 Получился пустой файл.")
+            raise VideoUnavailableError("Получился пустой файл.")
 
 
 def _tikwm_author(data: dict) -> str:
@@ -650,7 +650,6 @@ def _probe_height(path: Path) -> int | None:
         return None
 
 
-
 def _compress_video_sync(src: Path, out_dir: Path, target_bytes: int) -> Path | None:
     """Сжимает видео через ffmpeg до target_bytes.
 
@@ -724,7 +723,7 @@ async def _ensure_size(result: DownloadResult) -> DownloadResult:
     # Не влезло в лимит даже после сжатия — отдаём понятную ошибку,
     # а не пытаемся отправить файл, который Telegram всё равно отклонит.
     raise VideoTooLargeError(
-        "📦 Видео слишком большое — не удалось сжать до лимита Telegram. "
+        "Видео слишком большое — не удалось сжать до лимита Telegram. "
         "Попробуй другое видео."
     )
 
@@ -732,7 +731,6 @@ async def _ensure_size(result: DownloadResult) -> DownloadResult:
 async def _finish(result: DownloadResult) -> DownloadResult:
     """Финальная обработка: сжатие до лимита если нужно."""
     return await _ensure_size(result)
-
 
 
 def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> DownloadResult:
@@ -760,14 +758,14 @@ def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> D
         msg = str(e)
         if "ffmpeg is not installed" in msg.lower():
             raise TiktokError(
-                "🎬 Это видео-пин. Для него нужен ffmpeg — он уже есть "
+                "Это видео-пин. Для него нужен ffmpeg — он уже есть "
                 "на сервере, а локально установи ffmpeg."
             ) from e
         raise _classify_error(msg) from e
     except Exception as e:
         logger.exception(f"Ошибка скачивания видео-пина: {m3u8_url}")
         raise TiktokError(
-            "😔 Не удалось скачать видео-пин. Попробуй ещё раз."
+            "Не удалось скачать видео-пин. Попробуй ещё раз."
         ) from e
 
     files = sorted(
@@ -775,10 +773,10 @@ def _download_pinterest_video(m3u8_url: str, req_dir: Path, max_bytes: int) -> D
         if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
     )
     if not files:
-        raise VideoUnavailableError("😔 Не удалось получить видео из пина.")
+        raise VideoUnavailableError("Не удалось получить видео из пина.")
     if any(p.stat().st_size > max_bytes for p in files):
         raise VideoTooLargeError(
-            "📦 Видео слишком большое — даже сжатое не поместится в лимит "
+            "Видео слишком большое — даже сжатое не поместится в лимит "
             "Telegram."
         )
     return DownloadResult(
@@ -808,7 +806,7 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
                 if resp.status != 200:
                     _rmtree(req_dir)
                     raise VideoUnavailableError(
-                        "😔 Не удалось загрузить страницу Pinterest."
+                        "Не удалось загрузить страницу Pinterest."
                     )
                 html = await resp.text()
 
@@ -850,7 +848,7 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
                 og_url = og_url.replace("/736x/", "/originals/")
             img_urls.append(og_url)
 
-        # 2) JSON-данные — изображения из images_orig (карусели)
+        # 2) JSON-данные — изображения из images_orig (карусель)
         for m in re.finditer(r'"images_orig":\{[^}]*"url":"([^"]+)"', html):
             u = m.group(1)
             if u not in img_urls:
@@ -871,7 +869,7 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
         if not img_urls:
             _rmtree(req_dir)
             raise VideoUnavailableError(
-                "😔 Не удалось найти изображения в пине."
+                "Не удалось найти изображения в пине."
             )
 
         # Качаем каждое изображение
@@ -891,7 +889,7 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
         if not files:
             _rmtree(req_dir)
             raise VideoUnavailableError(
-                "😔 Не удалось скачать изображения из пина."
+                "Не удалось скачать изображения из пина."
             )
 
         return DownloadResult(
@@ -905,12 +903,12 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
         _rmtree(req_dir)
         logger.warning(f"Pinterest недоступен: {e}")
         raise TiktokError(
-            "😔 Не удалось загрузить страницу Pinterest."
+            "Не удалось загрузить страницу Pinterest."
         ) from e
     except (asyncio.TimeoutError, ValueError) as e:
         _rmtree(req_dir)
         logger.warning(f"Pinterest: ошибка парсинга: {e}")
-        raise TiktokError("😔 Pinterest не ответил.") from e
+        raise TiktokError("Pinterest не ответил.") from e
 
 
 async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool = True) -> DownloadResult:
@@ -944,7 +942,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
             if resp.status != 200:
                 logger.warning(f"tikwm: HTTP {resp.status} для {url}")
                 raise VideoUnavailableError(
-                    "😔 Сервис скачивания временно недоступен."
+                    "Сервис скачивания временно недоступен."
                 )
             payload = await resp.json(content_type=None)
 
@@ -952,7 +950,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
             msg = payload.get("msg") or "Неизвестная ошибка tikwm"
             logger.warning(f"tikwm ошибка (code={payload.get('code')}): {msg}")
             raise VideoUnavailableError(
-                f"😔 Не удалось скачать: {msg}"
+                f"Не удалось скачать: {msg}"
             )
 
         data = payload.get("data") or {}
@@ -972,7 +970,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
                 except VideoUnavailableError:
                     continue  # одно фото не скачалось — пробуем остальные
             if not files:
-                raise VideoUnavailableError("😔 Не удалось скачать фотопост.")
+                raise VideoUnavailableError("Не удалось скачать фотопост.")
 
             # Качаем аудио музыки (если есть)
             audio_file = None
@@ -1011,7 +1009,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
                 _dir=req_dir,
             )
 
-        raise VideoUnavailableError("😔 Не удалось получить ссылки на файлы.")
+        raise VideoUnavailableError("Не удалось получить ссылки на файлы.")
 
     try:
         async with _create_session() as session:
@@ -1036,7 +1034,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
                         break
                     await asyncio.sleep(1.5)
             _rmtree(req_dir)
-            raise last_error if last_error else VideoUnavailableError("😔 Не удалось скачать.")
+            raise last_error if last_error else VideoUnavailableError("Не удалось скачать.")
 
     except aiohttp.ClientError as e:
         _rmtree(req_dir)
@@ -1065,7 +1063,7 @@ async def _download_sync_timed(
     except asyncio.TimeoutError:
         logger.warning(f"yt-dlp завис (> {_YDL_TIMEOUT_SEC}с): {url}")
         raise DownloadTimeoutError(
-            "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+            "Скачивание заняло слишком много времени. Попробуй ещё раз."
         )
 
 
@@ -1087,7 +1085,7 @@ async def download(
     normalized = extract_media_url(url)
     if not normalized:
         raise UnsupportedUrlError(
-            "🤔 Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
+            "Неподдерживаемая ссылка. Поддерживаются: TikTok, Instagram, "
             "Pinterest, VK, Rutube, Одноклассники, X/Twitter, "
             "Dailymotion, Likee, Vimeo, Twitch, Tumblr, Bilibili, Xiaohongshu."
         )
@@ -1140,14 +1138,14 @@ async def download(
                 except asyncio.TimeoutError:
                     logger.warning(f"yt-dlp завис (> {_YDL_TIMEOUT_SEC}с): {normalized}")
                     raise DownloadTimeoutError(
-                        "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+                        "Скачивание заняло слишком много времени. Попробуй ещё раз."
                     )
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
                 except TiktokError as e:
                     logger.warning(f"yt-dlp не смог: {normalized}, ошибка: {e}")
                     raise TiktokError(
-                        "😔 Не удалось скачать видео через прокси. "
+                        "Не удалось скачать видео через прокси. "
                         "Проверь правильность PROXY_URL."
                     )
             else:
@@ -1161,14 +1159,14 @@ async def download(
                 except asyncio.TimeoutError:
                     logger.warning(f"tikwm завис (> {_TIKWM_TIMEOUT_SEC}с): {normalized}")
                     raise DownloadTimeoutError(
-                        "⏱ Скачивание заняло слишком много времени. Попробуй ещё раз."
+                        "Скачивание заняло слишком много времени. Попробуй ещё раз."
                     )
                 except (VideoTooLargeError, VideoUnavailableError):
                     raise
                 except TiktokError:
                     logger.warning(f"tikwm не смог: {normalized}")
                     raise TiktokError(
-                        "😔 Сервис скачивания TikTok временно недоступен. "
+                        "Сервис скачивания TikTok временно недоступен. "
                         "Попробуй ещё раз через минуту."
                     )
                 # TikTok: улучшаем звук (если включено в настройках)
