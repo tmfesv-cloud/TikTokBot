@@ -146,6 +146,20 @@ async def _create_session() -> aiohttp.ClientSession:
     return aiohttp.ClientSession(headers=_HTTP_HEADERS, connector=connector)
 
 
+def create_session_sync() -> aiohttp.ClientSession:
+    """Создаёт aiohttp сессию синхронно (для yt-dlp)."""
+    from aiohttp_socks import ProxyConnector
+
+    proxy_mgr = proxy_manager.get_proxy_manager()
+    proxy_url = None
+    if proxy_mgr:
+        proxy_url = proxy_mgr.get_proxy_url()
+
+    if proxy_url:
+        return aiohttp.ClientSession(headers=_HTTP_HEADERS)
+    return aiohttp.ClientSession(headers=_HTTP_HEADERS)
+
+
 class TiktokError(Exception):
     """Базовая ошибка скачивания TikTok."""
 
@@ -400,7 +414,7 @@ async def probe(url: str) -> ProbeResult:
     """
     if detect_platform(url) == "tiktok":
         try:
-            async with await _create_session() as session:
+            async with _create_session() as session:
                 api_url = _tikwm_api_url()
                 params = {"url": url, "hd": 1}
                 method = _tikwm_method()
@@ -589,7 +603,7 @@ async def _improve_tiktok_audio(
 
     try:
         # 1. Узнаём URL оригинального трека через tikwm и качаем его
-        async with await _create_session() as session:
+        async with _create_session() as session:
             api_url = _tikwm_api_url()
             params = {"url": url, "hd": 1}
             method = _tikwm_method()
@@ -806,7 +820,7 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
     req_dir.mkdir()
 
     try:
-        async with await _create_session() as session:
+        async with _create_session() as session:
             # Загружаем страницу пина (pin.it → редирект на полный URL)
             async with session.get(
                 url, timeout=aiohttp.ClientTimeout(total=20)
@@ -882,7 +896,7 @@ async def _download_pinterest(url: str, out_dir: Path, max_bytes: int) -> Downlo
 
         # Качаем каждое изображение
         files: list[Path] = []
-        async with await _create_session() as session:
+        async with _create_session() as session:
             for i, img_url in enumerate(img_urls[:20], 1):
                 dest = req_dir / f"{i:02d}.jpg"
                 try:
@@ -1020,7 +1034,7 @@ async def _download_via_tikwm(url: str, out_dir: Path, max_bytes: int, hd: bool 
         raise VideoUnavailableError("Не удалось получить ссылки на файлы.")
 
     try:
-        async with await _create_session() as session:
+        async with _create_session() as session:
             # Подписанные CDN-ссылки tikwm быстро истекают (403). Если файлы
             # не скачались — перезапрашиваем свежие ссылки, до 3 циклов.
             last_error: Exception | None = None
