@@ -1,12 +1,11 @@
-"""Менеджер прокси для автоматической смены при ошибках.
+"""Менеджер прокси для TikTokBot.
 
-Использует кэш рабочих прокси из файла для ускорения загрузки.
+Этот модуль позволяет использовать прокси для обхода блокировок платформ.
 """
 
 import asyncio
 import json
 import logging
-import random
 import time
 from pathlib import Path
 from typing import Optional
@@ -20,56 +19,39 @@ logger = logging.getLogger(__name__)
 # Кэш файл для сохранения рабочих прокси
 _CACHE_FILE = Path("downloads/proxy_cache.json")
 
-# Список публичных SOCKS5 прокси (из разных источников)
-_SOCKS5_PROXY_SOURCES = [
-    # Proxyscrape
+# Публичные прокси — обновляй этот список по мере необходимости
+# Источники: free-proxy-list.net, sslproxies.org, socks-proxy.net
+# Формат: "socks5://IP:PORT" или "http://IP:PORT"
+_PUBLIC_PROXIES = [
+    # SOCKS5 прокси (лучше для трафика)
     "socks5://185.220.101.10:50183",
     "socks5://185.220.101.34:50183",
     "socks5://185.220.100.99:50183",
-    # Geonode
     "socks5://194.26.29.10:55555",
     "socks5://194.26.29.11:55555",
-    # Дополнительные
-    "socks5://45.94.46.150:50183",
-    "socks5://103.145.82.23:50183",
-    "socks5://185.156.73.54:50183",
-    "socks5://185.156.73.70:50183",
-    "socks5://209.127.188.29:50183",
-    "socks5://178.128.23.50:50183",
-    "socks5://178.128.23.51:50183",
-    # Openproxylist
-    "socks5://159.89.177.225:50183",
-    "socks5://167.99.82.241:50183",
-]
-
-# Список публичных HTTP прокси
-_HTTP_PROXY_SOURCES = [
+    # HTTP прокси (если SOCKS5 не работают)
     "http://185.220.101.10:50182",
     "http://185.220.101.34:50182",
     "http://185.220.100.99:50182",
-    "http://194.26.29.10:55554",
-    "http://194.26.29.11:55554",
-    "http://45.94.46.150:50182",
-    "http://103.145.82.23:50182",
 ]
 
 
 class ProxyManager:
-    """Менеджер прокси с автоматическим fallback и ротацией."""
+    """Менеджер прокси с автоматическим выбором и ротацией."""
 
     def __init__(self):
         self._proxies: list[str] = []
         self._current_index: int = 0
         self._last_change_time: float = 0
-        self._change_interval: int = 300  # 5 минут между сменой
+        self._change_interval: int = 300  # 5 минут между ротацией
         self._failed_proxies: dict[str, float] = {}
-        self._failure_threshold: int = 2  # сколько раз можно провалиться до исключения
+        self._failure_threshold: int = 2
 
     async def load_proxies(self) -> bool:
         """Загружает прокси из кэша или проверяет новые."""
-        # Сначала пробуем загрузить из кэша
+        # Сначала пробуем из кэша
         if await self._load_from_cache():
-            logger.info(f"Proxy: загружено {len(self._proxies)} прокси из кэша")
+            logger.info(f"Proxy: загружено {len(self._proxies)} из кэша")
             return True
 
         # Если кэш пустой — проверяем новые
@@ -93,20 +75,19 @@ class ProxyManager:
                 cache = json.load(f)
 
             proxies = cache.get("proxies", [])
-            current_time = time.time()
+            if not proxies:
+                return False
 
-            # Проверяем что прокси не устарели (1 час)
+            current_time = time.time()
             if current_time - cache.get("timestamp", 0) > 3600:
                 return False
 
-            # Проверяем каждый прокси
             for proxy in proxies:
-                if await self._test_proxy(proxy, timeout=8):
+                if await self._test_proxy(proxy, timeout=10):
                     self._proxies.append(proxy)
 
             return len(self._proxies) > 0
-        except Exception as e:
-            logger.debug(f"Cache load failed: {e}")
+        except Exception:
             return False
 
     async def _save_to_cache(self) -> None:
@@ -120,36 +101,29 @@ class ProxyManager:
             with open(_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache, f, indent=2)
             logger.debug(f"Proxy: кэш сохранён ({len(self._proxies)} прокси)")
-        except Exception as e:
-            logger.debug(f"Cache save failed: {e}")
+        except Exception:
+            pass
 
     async def _test_and_load_proxies(self) -> None:
         """Проверяет все прокси и загружает рабочие."""
         self._proxies = []
         self._failed_proxies = {}
 
-        # Сначала проверяем ручной PROXY_URL
+        # Проверяем ручной PROXY_URL
         if Config.PROXY_URL:
-            if await self._test_proxy(Config.PROXY_URL, timeout=8):
+            if await self._test_proxy(Config.PROXY_URL, timeout=10):
                 self._proxies.append(Config.PROXY_URL)
                 logger.info(f"Proxy: добавлен ручной {Config.PROXY_URL}")
             else:
                 logger.warning(f"Proxy: ручной прокси не отвечает")
 
-        # Проверяем SOCKS5
-        for proxy in _SOCKS5_PROXY_SOURCES:
-            if await self._test_proxy(proxy, timeout=8):
+        # Проверяем публичные прокси
+        for proxy in _PUBLIC_PROXIES:
+            if await self._test_proxy(proxy, timeout=10):
                 self._proxies.append(proxy)
-                logger.info(f"Proxy: SOCKS5 {proxy}")
+                logger.info(f"Proxy: рабочий {proxy}")
 
-        # Если SOCKS5 нет, пробуем HTTP
-        if not self._proxies:
-            for proxy in _HTTP_PROXY_SOURCES:
-                if await self._test_proxy(proxy, timeout=8):
-                    self._proxies.append(proxy)
-                    logger.info(f"Proxy: HTTP {proxy}")
-
-    async def _test_proxy(self, proxy_url: str, timeout: int = 8) -> bool:
+    async def _test_proxy(self, proxy_url: str, timeout: int = 10) -> bool:
         """Проверяет доступность прокси."""
         try:
             async with aiohttp.ClientSession() as session:
