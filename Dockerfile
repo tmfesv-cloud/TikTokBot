@@ -2,9 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# ffmpeg нужен для слияния аудио/видео и водяного знака (drawtext)
-# fonts-dejavu-core — шрифт для текстового знака на видео
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
+# ffmpeg нужен для слияния аудио/видео и сжатия
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

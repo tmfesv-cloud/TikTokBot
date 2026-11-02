@@ -27,7 +27,7 @@ from aiohttp import web
 
 from config import Config
 from app.handlers import admin, start, settings, tiktok
-from app.services import stats, proxy_manager
+from app.services import stats
 
 # Настройка логирования
 logging.basicConfig(
@@ -35,19 +35,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-def _log_config() -> None:
-    """Логирует конфигурацию бота."""
-    logger.info(f"TikTokBot v1.0 запускается")
-    if Config.PROXY_URL:
-        logger.info(f"PROXY_URL настроен: {Config.PROXY_URL[:20]}...")
-    else:
-        logger.info("PROXY_URL не задан")
-    if Config.COOKIES_FILE:
-        logger.info(f"COOKIES_FILE: {Config.COOKIES_FILE}")
-    if Config.COOKIES_FROM_BROWSER:
-        logger.info(f"COOKIES_FROM_BROWSER: {Config.COOKIES_FROM_BROWSER}")
 
 
 def _get_proxy() -> str | None:
@@ -76,15 +63,7 @@ def _create_bot() -> Bot:
 
 
 async def on_startup(bot: Bot) -> None:
-    """Действия при запуске: меню команд + вебхук + прокси."""
-    # Инициализируем прокси
-    await proxy_manager.init_proxy_manager()
-    pm = proxy_manager.get_proxy_manager()
-    if pm and pm._proxies:
-        logger.info(f"Proxy: загружено {len(pm._proxies)} прокси")
-    else:
-        logger.warning("Proxy: не найдено рабочих прокси")
-
+    """Действия при запуске: меню команд + вебхук."""
     # Синяя кнопка меню с командами
     await bot.set_my_commands([
         BotCommand(command="help", description="Справка"),
@@ -344,8 +323,6 @@ def main() -> None:
             Config.WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
     _cleanup_old_downloads()
-
-    _log_config()
 
     logger.info(f"TikTokBot запускается... Режим: {'webhook' if Config.USE_WEBHOOK else 'polling'}")
 
