@@ -1,7 +1,10 @@
 import os
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -41,10 +44,53 @@ class Config:
     # COOKIES_FILE — путь к файлу cookies.txt (например, на Render).
     COOKIES_FILE: str = os.getenv("COOKIES_FILE", "")
 
-    # Cloudflare Worker — прокси для tikwm (обходит блокировку IP дата-центров).
-    # Если задан — запросы к tikwm идут через Worker, иначе напрямую.
-    TIKWM_PROXY_URL: str = os.getenv("TIKWM_PROXY_URL", "")
+    # Прокси для yt-dlp (например, на Render для обхода блокировок).
+    # Формат: http://user:pass@host:port или socks5://user:pass@host:port
+    PROXY_URL: str = os.getenv("PROXY_URL", "")
 
+    # Invidious instance для YouTube (если основной YouTube недоступен).
+    INVIDIOUS_INSTANCE: str = os.getenv("INVIDIOUS_INSTANCE", "")
+
+    # Публичные Invidious instance (fallback если INVIDIOUS_INSTANCE не задан)
+    _INVIDIOUS_PUBLIC: list[str] = [
+        "https://invidious.snopyta.org",
+        "https://invidious.kabi.tk",
+        "https://invidious.pimpmymovie.org",
+        "https://invidious.perennialdev.com",
+        "https://invidious.fdn.fr",
+        "https://vid.puffyan.us",
+    ]
+
+    # Список бесплатных SOCKS5 прокси (может меняться — публичные сервера)
+    _SOCKS5_PROXIES: list[str] = [
+        "socks5://37.193.95.9:10808",
+        "socks5://47.253.242.75:8080",
+        "socks5://185.220.101.10:50183",
+        "socks5://185.220.101.34:50183",
+        "socks5://185.220.100.99:50183",
+    ]
+
+    # Список бесплатных HTTP прокси
+    _HTTP_PROXIES: list[str] = [
+        "http://185.220.101.10:50182",
+        "http://185.220.101.34:50182",
+        "http://185.220.100.99:50182",
+    ]
+
+    @classmethod
+    def get_working_proxy(cls) -> str | None:
+        """Возвращает рабочий прокси из списка или None."""
+        if cls.PROXY_URL:
+            return cls.PROXY_URL
+        for proxy in cls._SOCKS5_PROXIES:
+            if _test_proxy_sync(proxy):
+                logger.info(f"Proxy: выбран SOCKS5 {proxy}")
+                return proxy
+        for proxy in cls._HTTP_PROXIES:
+            if _test_proxy_sync(proxy):
+                logger.info(f"Proxy: выбран HTTP {proxy}")
+                return proxy
+        return None
 
     @classmethod
     def validate(cls) -> list[str]:
@@ -53,3 +99,24 @@ class Config:
         if not cls.BOT_TOKEN:
             errors.append("BOT_TOKEN не задан! Получи его у @BotFather")
         return errors
+
+
+async def _test_proxy(proxy_url: str, timeout: int = 10) -> bool:
+    """Проверяет доступность прокси асинхронно."""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://www.tiktok.com/",
+                proxy=proxy_url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as r:
+                return r.status == 200
+    except Exception:
+        return False
+
+
+def _test_proxy_sync(proxy_url: str, timeout: int = 10) -> bool:
+    """Проверяет доступность прокси синхронно."""
+    import asyncio
+    return asyncio.run(_test_proxy(proxy_url, timeout))
